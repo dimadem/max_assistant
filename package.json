@@ -1,0 +1,26 @@
+{
+	"name": "max_assistant",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"dev": "bun run src/assistant.ts",
+		"build": "bun build src/assistant.ts --outfile assistant.js --target node --external max-api",
+		"format": "bunx biome format --write",
+		"lint": "bunx biome lint --write",
+		"check": "bunx biome check --write"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.3.9",
+		"@types/bun": "latest",
+		"@types/max-api": "^2.0.3"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	},
+	"dependencies": {
+		"@effect/ai": "^0.32.1",
+		"@effect/ai-openai": "^0.36.0",
+		"@effect/platform": "^0.93.8",
+		"effect": "^3.19.12"
+	}
+}
