@@ -105,11 +105,17 @@ const p = this.patcher;
  * setinletassist / setoutletassist — подсказки при наведении мыши
  */
 if (typeof setinletassist === "function") {
-	setinletassist(0, "Команды: create, connect, remove, set, send, get, list, getcontext");
+	setinletassist(
+		0,
+		"Команды: create, connect, remove, set, send, get, list, getcontext, getsubpatcher",
+	);
 }
 
 if (typeof setoutletassist === "function") {
-	setoutletassist(0, "Results to node.script: created, connected, error, context, list");
+	setoutletassist(
+		0,
+		"Results to node.script: created, connected, error, context, list",
+	);
 	setoutletassist(1, "Commands to js nodes: getcontext, get, list");
 }
 
@@ -144,6 +150,10 @@ const commandHandlers = {
 	getcontext: (args) => {
 		helpers.log("routing getcontext to js node");
 		outlet(1, "getcontext", ...args);
+	},
+	getsubpatcher: (args) => {
+		helpers.log("routing getsubpatcher to js node");
+		outlet(1, "getsubpatcher", ...args);
 	},
 	get: (args) => {
 		helpers.log("routing get to js node");
@@ -212,5 +222,7 @@ function anything() {
  */
 post("═════════\n");
 post("bridge.js loaded successfully\n");
-post("Commands: create, remove, connect, disconnect, set, send, get, list, getcontext\n");
+post(
+	"Commands: create, remove, connect, disconnect, set, send, get, list, getcontext, getsubpatcher\n",
+);
 post("═════════\n");

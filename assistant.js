@@ -28699,7 +28699,7 @@ var unwrapScoped5 = unwrapScoped4;
 var withSpan7 = withSpan6;
 var decodeText2 = decodeText;
 // src/assistant.ts
-import Max2 from "max-api";
+import Max4 from "max-api";
 
 // node_modules/@effect/ai/dist/esm/AiError.js
 var TypeId20 = "~@effect/ai/AiError";
@@ -31607,13 +31607,119 @@ var truncate = (self, tokenize, maxTokens) => suspend3(() => {
   return loop3;
 });
 // src/modules/agent.ts
+import Max3 from "max-api";
+
+// src/modules/chat/systemPrompt.ts
+var SYSTEM_PROMPT = `You are an expert Max MSP assistant that helps users understand and analyze their patches.
+
+## Your Capabilities
+You have access to tools that let you READ the current Max patch. You CANNOT modify the patch.
+
+## Available Tools
+- getPatchSummary: Get overview of the patch (object counts, connection count). Use FIRST for general questions.
+- listObjects: List all objects, optionally filtered by type.
+- findObject: Search for objects by name or text content.
+- getObjectDetails: Get detailed information about a specific object by ID.
+- getConnections: Get all connections (inputs/outputs) for a specific object.
+- getSubpatcher: Explore contents of subpatchers (p, bpatcher, poly~).
+
+## Tool Usage Strategy
+
+### For general questions ("What does this patch do?", "Describe the patch"):
+1. Call getPatchSummary first to understand the structure
+2. Identify key objects (dac~, adc~, main signal processors)
+3. Use getConnections on key objects to understand signal flow
+
+### For specific object questions ("Tell me about the filter", "What is cycle~ doing?"):
+1. Call findObject with the search term
+2. If found, call getObjectDetails for more info
+3. Optionally call getConnections to show signal flow
+
+### For signal flow questions ("How does audio get to output?", "What's the signal chain?"):
+1. Find the destination object (usually dac~)
+2. Use getConnections to trace backwards through the chain
+3. Build and explain the signal path
+
+## Response Guidelines
+- Respond in the SAME LANGUAGE the user writes in
+- Be concise but thorough
+- When describing signal flow, use clear formatting with arrows (→)
+- Mention object names exactly as they appear in the patch
+- If patch has issues (disconnected objects, unusual routing), mention them helpfully
+- For Max beginners, briefly explain what key objects do
+
+## Context Awareness
+- You maintain conversation history within a session
+- Reference previous findings without re-querying when possible
+- Build understanding incrementally across messages
+`;
+
+// src/modules/tools/definitions.ts
+var GetPatchSummaryTool = exports_Tool.make("getPatchSummary", {
+  description: "Get high-level patch overview: object counts by type, total connections, has audio I/O. Use FIRST to understand patch structure before detailed queries.",
+  success: exports_Schema.String
+});
+var ListObjectsTool = exports_Tool.make("listObjects", {
+  description: "List all objects in patch. Optionally filter by type. Use to discover what objects exist.",
+  parameters: {
+    filter: exports_Schema.optional(exports_Schema.String).annotations({
+      description: "Optional maxclass filter (e.g., 'cycle~', 'slider', 'number')"
+    })
+  },
+  success: exports_Schema.String
+});
+var FindObjectTool = exports_Tool.make("findObject", {
+  description: "Search for objects by name or text content. Use when user mentions a specific object.",
+  parameters: {
+    query: exports_Schema.String.annotations({
+      description: "Search term (object name, type, or text content)"
+    })
+  },
+  success: exports_Schema.String
+});
+var GetObjectDetailsTool = exports_Tool.make("getObjectDetails", {
+  description: "Get detailed information about specific object by ID: attributes, position, size. Use after finding object with findObject or listObjects.",
+  parameters: {
+    id: exports_Schema.String.annotations({
+      description: "Object varname/ID from previous queries"
+    })
+  },
+  success: exports_Schema.String
+});
+var GetConnectionsTool = exports_Tool.make("getConnections", {
+  description: "Get all connections (inputs and outputs) for specific object. Use to understand signal flow.",
+  parameters: {
+    id: exports_Schema.String.annotations({
+      description: "Object varname/ID"
+    })
+  },
+  success: exports_Schema.String
+});
+var GetSubpatcherTool = exports_Tool.make("getSubpatcher", {
+  description: "Get contents of subpatcher (p, bpatcher, poly~). Use when user asks about what's inside a subpatcher.",
+  parameters: {
+    id: exports_Schema.String.annotations({
+      description: "Subpatcher object varname/ID"
+    })
+  },
+  success: exports_Schema.String
+});
+
+// src/modules/tools/handlers.ts
+import Max2 from "max-api";
+
+// src/modules/bridge/index.ts
 import Max from "max-api";
 var pendingRequests = new Map;
 var handleBridgeResponse = (type, data) => {
+  Max.post(`handleBridgeResponse: type=${type}, pending=${pendingRequests.size}`);
   const deferred = pendingRequests.get(type);
   if (deferred) {
+    Max.post(`handleBridgeResponse: resolving deferred for ${type}`);
     exports_Effect.runSync(exports_Deferred.succeed(deferred, data));
     pendingRequests.delete(type);
+  } else {
+    Max.post(`handleBridgeResponse: no pending request for ${type}`);
   }
 };
 var sendToBridgeAndWait = (command, responseType, ...args2) => exports_Effect.gen(function* () {
@@ -31622,61 +31728,136 @@ var sendToBridgeAndWait = (command, responseType, ...args2) => exports_Effect.ge
   Max.outlet("bridge", command, ...args2);
   return yield* exports_Deferred.await(deferred);
 });
-var GetPatchContextTool = exports_Tool.make("getPatchContext", {
-  description: "Получить ВСЕ объекты и соединения патча целиком. Используй только когда нужен полный обзор всего патча.",
-  success: exports_Schema.String
+
+// src/modules/tools/handlers.ts
+var getPatchSummaryHandler = () => exports_Effect.gen(function* () {
+  Max2.post("Tool getPatchSummary: requesting...");
+  const context7 = yield* sendToBridgeAndWait("getcontext", "context");
+  const typeCounts = new Map;
+  for (const box of context7.boxes) {
+    const count2 = typeCounts.get(box.maxclass) || 0;
+    typeCounts.set(box.maxclass, count2 + 1);
+  }
+  const summary5 = {
+    totalObjects: context7.boxes.length,
+    totalConnections: context7.lines.length,
+    objectsByType: Object.fromEntries(typeCounts),
+    hasAudioInput: context7.boxes.some((b) => b.maxclass === "adc~"),
+    hasAudioOutput: context7.boxes.some((b) => b.maxclass === "dac~"),
+    subpatchers: context7.boxes.filter((b) => ["patcher", "bpatcher", "poly~"].includes(b.maxclass)).map((b) => b.id)
+  };
+  Max2.post(`Tool getPatchSummary: ${summary5.totalObjects} objects`);
+  return JSON.stringify(summary5, null, 2);
 });
-var ListObjectsTool = exports_Tool.make("listObjects", {
-  description: "Получить краткий список всех объектов. Используй когда нужно узнать какие объекты есть в патче.",
-  success: exports_Schema.String
+var listObjectsHandler = (params) => exports_Effect.gen(function* () {
+  Max2.post(`Tool listObjects: filter=${params.filter || "none"}`);
+  const context7 = yield* sendToBridgeAndWait("getcontext", "context");
+  let boxes = context7.boxes;
+  if (params.filter) {
+    const filter12 = params.filter.toLowerCase();
+    boxes = boxes.filter((b) => b.maxclass.toLowerCase().includes(filter12));
+  }
+  const list = boxes.map((b) => ({
+    id: b.id,
+    type: b.maxclass,
+    text: b.text
+  }));
+  Max2.post(`Tool listObjects: found ${list.length} objects`);
+  return JSON.stringify(list, null, 2);
 });
-var FindObjectTool = exports_Tool.make("findObject", {
-  description: "ПОИСК конкретного объекта по имени или типу. Используй когда пользователь спрашивает о конкретном объекте: 'найди cycle~', 'расскажи о slider', 'что делает route'.",
-  parameters: {
-    query: exports_Schema.String.annotations({
-      description: "Имя или тип объекта для поиска (например: cycle~, slider, route)"
-    })
-  },
-  success: exports_Schema.String
+var findObjectHandler = (params) => exports_Effect.gen(function* () {
+  Max2.post(`Tool findObject: searching for "${params.query}"...`);
+  const context7 = yield* sendToBridgeAndWait("getcontext", "context");
+  const query = params.query.toLowerCase();
+  const found = context7.boxes.filter((box) => {
+    const maxclass = box.maxclass.toLowerCase();
+    const text2 = box.text.toLowerCase();
+    const id2 = box.id.toLowerCase();
+    return maxclass.includes(query) || text2.includes(query) || id2.includes(query);
+  });
+  if (found.length === 0) {
+    return `Objects matching "${params.query}" not found`;
+  }
+  Max2.post(`Tool findObject: found ${found.length} matches`);
+  return JSON.stringify(found, null, 2);
 });
-var toolkit = exports_Toolkit.make(GetPatchContextTool, ListObjectsTool, FindObjectTool);
+var getObjectDetailsHandler = (params) => exports_Effect.gen(function* () {
+  Max2.post(`Tool getObjectDetails: id="${params.id}"`);
+  const context7 = yield* sendToBridgeAndWait("getcontext", "context");
+  const obj = context7.boxes.find((b) => b.id === params.id);
+  if (!obj) {
+    return JSON.stringify({ error: `Object "${params.id}" not found` });
+  }
+  const details = {
+    id: obj.id,
+    type: obj.maxclass,
+    text: obj.text,
+    position: [obj.rect[0], obj.rect[1]],
+    size: [obj.rect[2] - obj.rect[0], obj.rect[3] - obj.rect[1]],
+    inlets: obj.numinlets,
+    outlets: obj.numoutlets
+  };
+  return JSON.stringify(details, null, 2);
+});
+var getConnectionsHandler = (params) => exports_Effect.gen(function* () {
+  Max2.post(`Tool getConnections: id="${params.id}"`);
+  const context7 = yield* sendToBridgeAndWait("getcontext", "context");
+  const objIndex = context7.boxes.findIndex((b) => b.id === params.id);
+  if (objIndex === -1) {
+    return JSON.stringify({ error: `Object "${params.id}" not found` });
+  }
+  const obj = context7.boxes[objIndex];
+  const inputs = context7.lines.filter((l) => l.dst[0] === objIndex).map((l) => ({
+    fromObject: context7.boxes[l.src[0]]?.id,
+    fromOutlet: l.src[1],
+    toInlet: l.dst[1]
+  }));
+  const outputs = context7.lines.filter((l) => l.src[0] === objIndex).map((l) => ({
+    toObject: context7.boxes[l.dst[0]]?.id,
+    fromOutlet: l.src[1],
+    toInlet: l.dst[1]
+  }));
+  return JSON.stringify({
+    object: { id: obj.id, type: obj.maxclass, text: obj.text },
+    inputs,
+    outputs
+  }, null, 2);
+});
+var getSubpatcherHandler = (params) => exports_Effect.gen(function* () {
+  Max2.post(`Tool getSubpatcher: id="${params.id}"`);
+  const subContext = yield* sendToBridgeAndWait("getsubpatcher", "subpatcher", params.id);
+  if ("error" in subContext) {
+    return JSON.stringify(subContext);
+  }
+  return JSON.stringify(subContext, null, 2);
+});
+
+// src/modules/tools/index.ts
+var toolkit = exports_Toolkit.make(GetPatchSummaryTool, ListObjectsTool, FindObjectTool, GetObjectDetailsTool, GetConnectionsTool, GetSubpatcherTool);
+var ToolHandlersLayer = toolkit.toLayer({
+  getPatchSummary: getPatchSummaryHandler,
+  listObjects: listObjectsHandler,
+  findObject: findObjectHandler,
+  getObjectDetails: getObjectDetailsHandler,
+  getConnections: getConnectionsHandler,
+  getSubpatcher: getSubpatcherHandler
+});
+
+// src/modules/agent.ts
 var chatRef = exports_Effect.runSync(exports_Effect.map(exports_Ref.make(null), (ref) => ref));
 var getOrCreateChat = exports_Effect.gen(function* () {
   const existing = yield* exports_Ref.get(chatRef);
   if (existing)
     return existing;
   const chat = yield* exports_Chat.empty;
+  yield* exports_Ref.update(chat.history, (h) => exports_Prompt.concat(h, exports_Prompt.make([
+    {
+      _tag: "system",
+      content: SYSTEM_PROMPT
+    }
+  ])));
   yield* exports_Ref.set(chatRef, chat);
   return chat;
-});
-var getPatchContextHandler = () => exports_Effect.gen(function* () {
-  Max.post("Tool getPatchContext: requesting...");
-  const context7 = yield* sendToBridgeAndWait("getcontext", "context");
-  return JSON.stringify(context7, null, 2);
-});
-var getListHandler = () => exports_Effect.gen(function* () {
-  Max.post("Tool listObjects: requesting...");
-  const list = yield* sendToBridgeAndWait("list", "list");
-  return JSON.stringify(list, null, 2);
-});
-var findObjectHandler = (params) => exports_Effect.gen(function* () {
-  Max.post(`Tool findObject: searching for "${params.query}"...`);
-  const context7 = yield* sendToBridgeAndWait("getcontext", "context");
-  const query = params.query.toLowerCase();
-  const found = context7.boxes.filter((box) => {
-    const maxclass = box.maxclass.toLowerCase();
-    const text2 = box.text.toLowerCase();
-    return maxclass.includes(query) || text2.includes(query);
-  });
-  if (found.length === 0) {
-    return `Объекты по запросу "${params.query}" не найдены`;
-  }
-  return JSON.stringify(found, null, 2);
-});
-var ToolHandlersLayer = toolkit.toLayer({
-  getPatchContext: getPatchContextHandler,
-  listObjects: getListHandler,
-  findObject: findObjectHandler
 });
 var generateResponse = (prompt) => exports_Effect.gen(function* () {
   const chat = yield* getOrCreateChat;
@@ -31686,9 +31867,9 @@ var generateResponse = (prompt) => exports_Effect.gen(function* () {
   });
   const hasToolCall = response.content.some((part) => part.type === "tool-result");
   if (hasToolCall && !response.text) {
-    Max.post("Tool was called, generating final response...");
+    Max3.post("Tool was called, generating final response...");
     response = yield* chat.generateText({
-      prompt: "Опиши результат на русском языке."
+      prompt: "Describe the result based on the user's language."
     });
   }
   return response.text;
@@ -31698,6 +31879,12 @@ var clearHistory = exports_Effect.gen(function* () {
   if (chat) {
     yield* exports_Ref.set(chat.history, exports_Prompt.empty);
   }
+});
+var exportHistory = exports_Effect.gen(function* () {
+  const chat = yield* exports_Ref.get(chatRef);
+  if (!chat)
+    return null;
+  return yield* chat.exportJson;
 });
 // node_modules/@effect/platform/dist/esm/HttpClientResponse.js
 var matchStatus2 = matchStatus;
@@ -43125,29 +43312,29 @@ var OpenAiWithHttp = exports_Layer.provide(OpenAi, exports_FetchHttpClient.layer
 
 // src/assistant.ts
 var toBridge = (...args2) => {
-  Max2.outlet("bridge", ...args2);
+  Max4.outlet("bridge", ...args2);
 };
-Max2.addHandlers({
+Max4.addHandlers({
   string: (prompt) => {
     generateResponse(prompt).pipe(exports_Effect.provide(model2), exports_Effect.provide(OpenAiWithHttp), exports_Effect.runPromise).then((text2) => {
-      Max2.post(`Assistant: ${text2}`);
+      Max4.post(`Assistant: ${text2}`);
     }).catch((error) => {
-      Max2.post(`Error: ${error.message}`);
+      Max4.post(`Error: ${error.message}`);
     });
   },
   bridgeResponse: (type, ...data) => {
-    Max2.post(`Bridge response: ${type}`);
+    Max4.post(`Bridge response: ${type}`);
     if (data[0]) {
       try {
         const parsed = JSON.parse(data[0]);
         handleBridgeResponse(type, parsed);
       } catch (e) {
-        Max2.post(`Failed to parse bridge response: ${e}`);
+        Max4.post(`Failed to parse bridge response: ${e}`);
       }
     }
   },
   clear: () => {
-    clearHistory.pipe(exports_Effect.runPromise).then(() => Max2.post("History cleared")).catch((error) => Max2.post(error.message));
+    clearHistory.pipe(exports_Effect.runPromise).then(() => Max4.post("History cleared")).catch((error) => Max4.post(error.message));
   }
 });
 export {
