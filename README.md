@@ -42,3 +42,4 @@ bun run dev
 - **AI**: @effect/ai with OpenAI
 - **Framework**: Effect.ts for functional programming
 - **Integration**: max-api for Max/MSP
+

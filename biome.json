@@ -1,5 +1,5 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.3.9/schema.json",
+	"$schema": "https://biomejs.dev/schemas/2.4.11/schema.json",
 	"vcs": {
 		"enabled": true,
 		"clientKind": "git",
@@ -38,6 +38,20 @@
 				"rules": {
 					"correctness": {
 						"noUndeclaredVariables": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["bridge-getcontext.js"],
+			"linter": {
+				"rules": {
+					"correctness": {
+						"noUndeclaredVariables": "off",
+						"noInnerDeclarations": "off"
+					},
+					"style": {
+						"useTemplate": "off"
 					}
 				}
 			}

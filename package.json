@@ -5,22 +5,29 @@
 	"scripts": {
 		"dev": "bun run src/assistant.ts",
 		"build": "bun build src/assistant.ts --outfile assistant.js --target node --external max-api",
+		"mcp": "bun run src/mcp-server.ts",
 		"format": "bunx biome format --write",
 		"lint": "bunx biome lint --write",
-		"check": "bunx biome check --write"
+		"check": "bunx biome check --write",
+		"knip": "bunx knip",
+		"typecheck": "tsc --noEmit",
+		"audit": "bun run typecheck && bun run check && bun run knip && bun outdated"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.3.9",
-		"@types/bun": "latest",
-		"@types/max-api": "^2.0.3"
+		"@biomejs/biome": "2.4.11",
+		"@types/max-api": "^2.0.3",
+		"bun-types": "^1.3.12",
+		"knip": "^6.4.0",
+		"typescript": "^6.0.2"
 	},
-	"peerDependencies": {
-		"typescript": "^5"
+	"knip": {
+		"ignore": [
+			"assistant.js",
+			"bridge.js"
+		]
 	},
 	"dependencies": {
-		"@effect/ai": "^0.32.1",
-		"@effect/ai-openai": "^0.36.0",
-		"@effect/platform": "^0.93.8",
-		"effect": "^3.19.12"
+		"@modelcontextprotocol/sdk": "^1.13.0",
+		"zod": "^4.3.6"
 	}
 }
