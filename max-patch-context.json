@@ -3,7 +3,7 @@
 		{
 			"id": "obj-14",
 			"maxclass": "textedit",
-			"text": "hello world",
+			"text": "расскажи что умеет обьект button",
 			"rect": [333, 206, 200, 74],
 			"numinlets": 1,
 			"numoutlets": 4

@@ -9,7 +9,7 @@
             "modernui": 1
         },
         "classnamespace": "box",
-        "rect": [ 1344.0, 467.0, 609.0, 774.0 ],
+        "rect": [ 34.0, 92.0, 1214.0, 1314.0 ],
         "boxes": [
             {
                 "box": {
@@ -20,7 +20,7 @@
                     "outlettype": [ "", "int", "", "" ],
                     "parameter_enable": 0,
                     "patching_rect": [ 333.0, 206.0, 200.0, 74.0 ],
-                    "text": "hello world"
+                    "text": "расскажи что умеет обьект button"
                 }
             },
             {

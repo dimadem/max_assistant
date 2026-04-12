@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -11,6 +11,9 @@ const CONTEXT_FILE = join(
 	"..",
 	"max-patch-context.json",
 );
+
+const MAX_REFPAGES =
+	"/Applications/Max.app/Contents/Resources/C74/docs/refpages";
 
 function loadContext(): PatchContext {
 	try {
@@ -39,67 +42,10 @@ server.tool(
 );
 
 server.tool(
-	"list_objects",
-	"List all objects in the Max patch, optionally filtered by type (maxclass).",
-	{
-		filter: z
-			.string()
-			.optional()
-			.describe("Optional filter by maxclass, e.g. 'cycle~', 'dac~', 'slider'"),
-	},
-	async ({ filter }) => {
-		const ctx = loadContext();
-		let boxes = ctx.boxes;
-		if (filter) {
-			const f = filter.toLowerCase();
-			boxes = boxes.filter((b) => b.maxclass.toLowerCase().includes(f));
-		}
-		const list = boxes.map((b) => ({
-			id: b.id,
-			type: b.maxclass,
-			text: b.text,
-		}));
-		return {
-			content: [{ type: "text", text: JSON.stringify(list, null, 2) }],
-		};
-	},
-);
-
-server.tool(
-	"find_object",
-	"Search for objects by name, type, or text content.",
-	{
-		query: z
-			.string()
-			.describe("Search term to match against object id, maxclass, or text"),
-	},
-	async ({ query }) => {
-		const ctx = loadContext();
-		const q = query.toLowerCase();
-		const found = ctx.boxes.filter(
-			(b) =>
-				b.id.toLowerCase().includes(q) ||
-				b.maxclass.toLowerCase().includes(q) ||
-				b.text.toLowerCase().includes(q),
-		);
-		if (found.length === 0) {
-			return {
-				content: [{ type: "text", text: `No objects matching "${query}"` }],
-			};
-		}
-		return {
-			content: [{ type: "text", text: JSON.stringify(found, null, 2) }],
-		};
-	},
-);
-
-server.tool(
 	"get_connections",
-	"Get all inputs and outputs for a specific object by its id.",
+	"Get all inputs and outputs for a specific object by its id (from get_patch_context).",
 	{
-		id: z
-			.string()
-			.describe("Object varname/id from list_objects or find_object"),
+		id: z.string().describe("Object varname/id from get_patch_context"),
 	},
 	async ({ id }) => {
 		const ctx = loadContext();
@@ -142,6 +88,37 @@ server.tool(
 					),
 				},
 			],
+		};
+	},
+);
+
+server.tool(
+	"get_object_docs",
+	"Get Max MSP reference documentation for an object type: description, inlets, outlets, messages, attributes. Use to understand what an object does and what data it accepts.",
+	{
+		maxclass: z
+			.string()
+			.describe("Object type, e.g. 'cycle~', 'button', 'route', 'prepend'"),
+	},
+	async ({ maxclass }) => {
+		const dirs = ["max-ref", "msp-ref", "jit-ref", "m4l-ref"];
+		let xml: string | null = null;
+		for (const dir of dirs) {
+			const p = join(MAX_REFPAGES, dir, `${maxclass}.maxref.xml`);
+			if (existsSync(p)) {
+				xml = readFileSync(p, "utf-8");
+				break;
+			}
+		}
+		if (!xml) {
+			return {
+				content: [
+					{ type: "text", text: `No reference found for "${maxclass}"` },
+				],
+			};
+		}
+		return {
+			content: [{ type: "text", text: xml }],
 		};
 	},
 );
