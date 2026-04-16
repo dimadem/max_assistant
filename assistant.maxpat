@@ -9,18 +9,19 @@
             "modernui": 1
         },
         "classnamespace": "box",
-        "rect": [ 34.0, 92.0, 1214.0, 1314.0 ],
+        "rect": [ 1314.0, 93.0, 1213.0, 1314.0 ],
         "boxes": [
             {
                 "box": {
                     "id": "obj-14",
+                    "linecount": 5,
                     "maxclass": "textedit",
                     "numinlets": 1,
                     "numoutlets": 4,
                     "outlettype": [ "", "int", "", "" ],
                     "parameter_enable": 0,
                     "patching_rect": [ 333.0, 206.0, 200.0, 74.0 ],
-                    "text": "расскажи что умеет обьект button"
+                    "text": "а посмотри докумекнтацию у route bridge & v8 bridge.js на сколько это правильное решение было ? что мы так соединили ноды и собрали их "
                 }
             },
             {
@@ -120,8 +121,6 @@
                     "saved_object_attributes": {
                         "autostart": 1,
                         "defer": 0,
-                        "node_bin_path": "",
-                        "npm_bin_path": "",
                         "watch": 0
                     },
                     "text": "node.script assistant.js @autostart 1",
