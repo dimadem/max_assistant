@@ -1,10 +1,13 @@
 {
-	"name": "max_assistant",
+	"name": "assistant",
 	"type": "module",
 	"private": true,
 	"scripts": {
 		"dev": "bun run src/assistant.ts",
-		"build": "bun build src/assistant.ts --outfile code/assistant.js --target node --external max-api",
+		"dev:ui": "bun run scripts/ui-server.ts",
+		"build": "bun run build:agent && bun run build:ui",
+		"build:agent": "bun build src/assistant.ts --outfile code/assistant.js --target node --external max-api",
+		"build:ui": "bun build src/ui/app.ts --outfile ui/app.js --target browser --format iife",
 		"mcp": "bun run src/mcp-server.ts",
 		"format": "bunx biome format --write",
 		"lint": "bunx biome lint --write",
@@ -17,17 +20,20 @@
 		"@biomejs/biome": "2.4.11",
 		"@types/max-api": "^2.0.3",
 		"bun-types": "^1.3.12",
-		"knip": "^6.4.0",
+		"knip": "^6.4.1",
 		"typescript": "^6.0.2"
 	},
 	"knip": {
-		"ignore": [
-			"code/assistant.js",
-			"javascript/bridge.js"
+		"entry": [
+			"src/ui/app.ts"
+		],
+		"project": [
+			"src/**/*.ts",
+			"scripts/**/*.ts"
 		]
 	},
 	"dependencies": {
-		"@modelcontextprotocol/sdk": "^1.13.0",
+		"@modelcontextprotocol/sdk": "^1.29.0",
 		"zod": "^4.3.6"
 	}
 }

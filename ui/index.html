@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>assistant</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="bar top">
+    <span class="title">assistant</span>
+    <button id="new-chat" type="button">new chat</button>
+  </header>
+
+  <main id="log" aria-live="polite"></main>
+
+  <form id="form" class="bar input" autocomplete="off">
+    <span class="prompt">&gt;</span>
+    <input id="inp" type="text" spellcheck="false" autocomplete="off"
+           placeholder="ask about the patch…" />
+  </form>
+
+  <footer class="bar status" id="status">ready</footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

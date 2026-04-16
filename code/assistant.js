@@ -36,11 +36,24 @@ function convertMaxpat(raw) {
 	return { boxes, lines };
 }
 
+// src/types/protocol.ts
+var UI_IN = {
+	appendUser: "appendUser",
+	appendAssistant: "appendAssistant",
+	appendSystem: "appendSystem",
+	appendError: "appendError",
+	status: "status",
+	busy: "busy",
+	clearChat: "clearChat",
+};
+var encodeText = (text) => JSON.stringify({ text });
+
 // src/assistant.ts
 var scriptDir = dirname(fileURLToPath(import.meta.url));
 var PROJECT_ROOT = join(scriptDir, "..");
-var contextFile = join(PROJECT_ROOT, "max-patch-context.json");
+var contextFile = join(PROJECT_ROOT, "patch-context.json");
 var MCP_CONFIG = join(PROJECT_ROOT, ".mcp.json");
+var UI_URL = `file://${join(PROJECT_ROOT, "ui", "index.html")}`;
 var pendingPrompts = [];
 var currentSessionId = null;
 var SYSTEM_PROMPT = [
@@ -65,6 +78,15 @@ var extraPaths = [
 	"/bin",
 ];
 var ENRICHED_PATH = [...extraPaths, process.env.PATH ?? ""].join(":");
+function sendText(selector, text) {
+	Max.outlet(selector, encodeText(text));
+}
+function setBusy(on) {
+	Max.outlet(UI_IN.busy, on ? 1 : 0);
+}
+function setStatus(text) {
+	sendText(UI_IN.status, text);
+}
 function spawnClaude(prompt) {
 	const args = [
 		"--print",
@@ -103,37 +125,65 @@ function spawnClaude(prompt) {
 	}, 120000);
 	child.on("close", (code) => {
 		clearTimeout(timeout);
+		setBusy(false);
 		const raw = Buffer.concat(stdoutChunks).toString().trim();
 		if (code !== 0) {
-			Max.post(`Claude exited with code ${code}`);
+			const msg = `Claude exited with code ${code}`;
+			Max.post(msg);
+			sendText(UI_IN.appendError, msg);
+			setStatus("ready");
 			return;
 		}
-		if (!raw) return;
+		if (!raw) {
+			setStatus("ready");
+			return;
+		}
 		try {
 			const parsed = JSON.parse(raw);
 			if (parsed.is_error) {
-				Max.post(`Claude error: ${parsed.result ?? "(no message)"}`);
+				const msg = `Claude error: ${parsed.result ?? "(no message)"}`;
+				Max.post(msg);
+				sendText(UI_IN.appendError, msg);
+				setStatus("ready");
 				return;
 			}
 			if (parsed.session_id) currentSessionId = parsed.session_id;
 			const text = parsed.result?.trim() ?? "";
-			if (text) Max.outlet("reply", text);
+			if (text) sendText(UI_IN.appendAssistant, text);
+			setStatus("ready");
 		} catch (e) {
-			Max.post(`Failed to parse claude JSON: ${e}`);
+			const msg = `Failed to parse claude JSON: ${e}`;
+			Max.post(msg);
+			sendText(UI_IN.appendError, msg);
+			setStatus("ready");
 		}
 	});
 	child.on("error", (err) => {
-		Max.post(`Failed to start claude: ${err.message}`);
+		setBusy(false);
+		const msg = `Failed to start claude: ${err.message}`;
+		Max.post(msg);
+		sendText(UI_IN.appendError, msg);
+		setStatus("ready");
 	});
 }
+function joinArgs(args) {
+	return args.map(String).join(" ");
+}
 Max.addHandlers({
-	prompt: (text) => {
+	prompt: (...args) => {
+		const text = joinArgs(args).trim();
+		if (!text) return;
 		pendingPrompts.push(text);
+		setBusy(true);
+		setStatus("getting patch context…");
 		Max.outlet("bridge", "getcontext");
-		Max.post("Getting patch context...");
 	},
 	clear: () => {
 		currentSessionId = null;
+		pendingPrompts.length = 0;
+		Max.outlet(UI_IN.clearChat);
+		setStatus("ready");
+		setBusy(false);
 		Max.post("Session cleared");
 	},
 	bridgeResponse: (type, ...data) => {
@@ -145,16 +195,20 @@ Max.addHandlers({
 				const raw = JSON.parse(readFileSync(patchPath, "utf-8"));
 				const ctx = convertMaxpat(raw);
 				writeFileSync(contextFile, JSON.stringify(ctx, null, 2));
-				Max.post(
-					`Patch: ${ctx.boxes.length} objects, ${ctx.lines.length} connections`,
+				setStatus(
+					`running claude · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`,
 				);
 				spawnClaude(prompt);
 			} catch (e) {
-				Max.post(`Error: ${e}`);
+				const msg = `Error: ${e}`;
+				Max.post(msg);
+				sendText(UI_IN.appendError, msg);
+				setBusy(false);
+				setStatus("ready");
 			}
 		}
 	},
 });
-Max.post(
-	"Max Assistant ready. Type a prompt and press Enter to ask about the patch.",
-);
+Max.outlet("url", UI_URL);
+setStatus("ready");
+Max.post(`Assistant ready. UI: ${UI_URL}`);

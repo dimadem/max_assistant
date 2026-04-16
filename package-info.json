@@ -1,9 +1,9 @@
 {
-	"name": "max-assistant",
-	"displayname": "Max Assistant",
+	"name": "assistant",
+	"displayname": "Assistant",
 	"version": "0.1.0",
 	"author": "Dima Dem",
 	"description": "AI agent backed by Claude Code",
-	"homepatcher": "max-assistant.maxpat",
+	"homepatcher": "assistant.maxpat",
 	"max_version_min": "9.0.0"
 }

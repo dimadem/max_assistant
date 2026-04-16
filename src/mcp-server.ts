@@ -9,7 +9,7 @@ import type { PatchContext } from "./types/max.ts";
 const CONTEXT_FILE = join(
 	dirname(fileURLToPath(import.meta.url)),
 	"..",
-	"max-patch-context.json",
+	"patch-context.json",
 );
 
 const MAX_REFPAGES =

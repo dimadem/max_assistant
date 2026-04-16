@@ -1,7 +1,7 @@
 {
 	"compilerOptions": {
 		// Environment
-		"lib": ["ESNext"],
+		"lib": ["ESNext", "DOM", "DOM.Iterable"],
 		"types": ["bun-types"],
 		"target": "ESNext",
 		"module": "Preserve",

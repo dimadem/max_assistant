@@ -5,12 +5,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Max from "max-api";
 import { convertMaxpat, type RawMaxpat } from "./types/max.ts";
+import { encodeText, UI_IN, type UIInSelector } from "./types/protocol.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 // In dev: scriptDir = .../src — go up. After build: scriptDir = .../code — go up.
 const PROJECT_ROOT = join(scriptDir, "..");
-const contextFile = join(PROJECT_ROOT, "max-patch-context.json");
+const contextFile = join(PROJECT_ROOT, "patch-context.json");
 const MCP_CONFIG = join(PROJECT_ROOT, ".mcp.json");
+const UI_URL = `file://${join(PROJECT_ROOT, "ui", "index.html")}`;
 
 // Queue instead of a single global — fixes race condition when user sends
 // multiple messages before the first context response arrives.
@@ -52,6 +54,20 @@ interface ClaudeJsonResult {
 	is_error: boolean;
 	result?: string;
 	session_id: string;
+}
+
+// Text payloads go through encodeText so multi-word strings survive Max's
+// atom boundary (the jweb side reassembles via decodeText).
+function sendText(selector: UIInSelector, text: string): void {
+	Max.outlet(selector, encodeText(text));
+}
+
+function setBusy(on: boolean): void {
+	Max.outlet(UI_IN.busy, on ? 1 : 0);
+}
+
+function setStatus(text: string): void {
+	sendText(UI_IN.status, text);
 }
 
 function spawnClaude(prompt: string): void {
@@ -100,41 +116,71 @@ function spawnClaude(prompt: string): void {
 
 	child.on("close", (code: number | null) => {
 		clearTimeout(timeout);
+		setBusy(false);
 		const raw = Buffer.concat(stdoutChunks).toString().trim();
 		if (code !== 0) {
-			Max.post(`Claude exited with code ${code}`);
+			const msg = `Claude exited with code ${code}`;
+			Max.post(msg);
+			sendText(UI_IN.appendError, msg);
+			setStatus("ready");
 			return;
 		}
-		if (!raw) return;
+		if (!raw) {
+			setStatus("ready");
+			return;
+		}
 
 		try {
 			const parsed = JSON.parse(raw) as ClaudeJsonResult;
 			if (parsed.is_error) {
-				Max.post(`Claude error: ${parsed.result ?? "(no message)"}`);
+				const msg = `Claude error: ${parsed.result ?? "(no message)"}`;
+				Max.post(msg);
+				sendText(UI_IN.appendError, msg);
+				setStatus("ready");
 				return;
 			}
 			// Keep session_id from Claude in case it differs (forked session, etc).
 			if (parsed.session_id) currentSessionId = parsed.session_id;
 			const text = parsed.result?.trim() ?? "";
-			if (text) Max.outlet("reply", text);
+			if (text) sendText(UI_IN.appendAssistant, text);
+			setStatus("ready");
 		} catch (e) {
-			Max.post(`Failed to parse claude JSON: ${e}`);
+			const msg = `Failed to parse claude JSON: ${e}`;
+			Max.post(msg);
+			sendText(UI_IN.appendError, msg);
+			setStatus("ready");
 		}
 	});
 
 	child.on("error", (err: Error) => {
-		Max.post(`Failed to start claude: ${err.message}`);
+		setBusy(false);
+		const msg = `Failed to start claude: ${err.message}`;
+		Max.post(msg);
+		sendText(UI_IN.appendError, msg);
+		setStatus("ready");
 	});
 }
 
+// Reassemble a user prompt that Max may have split into multiple atoms.
+function joinArgs(args: unknown[]): string {
+	return args.map(String).join(" ");
+}
+
 Max.addHandlers({
-	prompt: (text: string) => {
+	prompt: (...args: unknown[]) => {
+		const text = joinArgs(args).trim();
+		if (!text) return;
 		pendingPrompts.push(text);
+		setBusy(true);
+		setStatus("getting patch context…");
 		Max.outlet("bridge", "getcontext");
-		Max.post("Getting patch context...");
 	},
 	clear: () => {
 		currentSessionId = null;
+		pendingPrompts.length = 0;
+		Max.outlet(UI_IN.clearChat);
+		setStatus("ready");
+		setBusy(false);
 		Max.post("Session cleared");
 	},
 	bridgeResponse: (type: string, ...data: unknown[]) => {
@@ -147,17 +193,25 @@ Max.addHandlers({
 				const raw = JSON.parse(readFileSync(patchPath, "utf-8")) as RawMaxpat;
 				const ctx = convertMaxpat(raw);
 				writeFileSync(contextFile, JSON.stringify(ctx, null, 2));
-				Max.post(
-					`Patch: ${ctx.boxes.length} objects, ${ctx.lines.length} connections`,
+				setStatus(
+					`running claude · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`,
 				);
 				spawnClaude(prompt);
 			} catch (e) {
-				Max.post(`Error: ${e}`);
+				const msg = `Error: ${e}`;
+				Max.post(msg);
+				sendText(UI_IN.appendError, msg);
+				setBusy(false);
+				setStatus("ready");
 			}
 		}
 	},
 });
 
-Max.post(
-	"Max Assistant ready. Type a prompt and press Enter to ask about the patch.",
-);
+// Tell [jweb] which page to load. Doing it from here (instead of hardcoding
+// @url in the .maxpat) keeps the project portable — the path is computed
+// from PROJECT_ROOT. Message goes jweb ← [route bridge] (right outlet) ← us.
+Max.outlet("url", UI_URL);
+
+setStatus("ready");
+Max.post(`Assistant ready. UI: ${UI_URL}`);

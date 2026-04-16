@@ -8,10 +8,27 @@ autowatch = 1;
 inlets = 1;
 outlets = 1;
 
-// Explicitly register on globalThis so v8 message dispatch can always find it,
-// even if the script is loaded as a module where top-level `function` bindings
-// don't leak to global scope.
-globalThis.getcontext = function () {
-	this.patcher.message("write"); // auto-save before reading from disk
-	outlet(0, "bridgeResponse", "context", this.patcher.filepath);
-};
+post("bridge.js v3 loaded\n");
+
+// Walk up the patcher hierarchy to the top-level. Docs say `parentpatcher`
+// is undefined for top-level patchers, but in practice v8 also returns null
+// — truthy check handles both.
+function topLevel(p) {
+	while (p.parentpatcher) {
+		p = p.parentpatcher;
+	}
+	return p;
+}
+
+function getcontext() {
+	// When the assistant patcher is used as an abstraction/bpatcher inside another
+	// patcher, this.patcher points to the abstraction itself. We want to
+	// analyse the host patcher, so walk up to its top-level.
+	var target = topLevel(this.patcher);
+	target.message("write"); // auto-save before reading from disk
+	outlet(0, "bridgeResponse", "context", target.filepath);
+}
+
+// Register both ways so v8 dispatch finds the function regardless of whether
+// top-level `function` declarations leak to global scope in this runtime.
+globalThis.getcontext = getcontext;

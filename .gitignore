@@ -35,4 +35,4 @@ CLAUDE.md
 
 # Finder (MacOS) folder config
 .DS_Store
-max-patch-context.json
+patch-context.json
