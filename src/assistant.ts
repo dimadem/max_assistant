@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,16 +7,18 @@ import Max from "max-api";
 import { convertMaxpat, type RawMaxpat } from "./types/max.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-// In dev: scriptDir = .../src — go up. After build: scriptDir = project root — stay.
-const PROJECT_ROOT = scriptDir.endsWith("/src")
-	? join(scriptDir, "..")
-	: scriptDir;
+// In dev: scriptDir = .../src — go up. After build: scriptDir = .../code — go up.
+const PROJECT_ROOT = join(scriptDir, "..");
 const contextFile = join(PROJECT_ROOT, "max-patch-context.json");
 const MCP_CONFIG = join(PROJECT_ROOT, ".mcp.json");
 
 // Queue instead of a single global — fixes race condition when user sends
 // multiple messages before the first context response arrives.
 const pendingPrompts: string[] = [];
+
+// Continues the same Claude session across prompts so the agent remembers
+// prior messages. Reset by the "clear" handler.
+let currentSessionId: string | null = null;
 
 const SYSTEM_PROMPT = [
 	"You are an expert Max/MSP assistant embedded inside a live Max patch.",
@@ -43,29 +46,41 @@ const extraPaths = [
 ];
 const ENRICHED_PATH = [...extraPaths, process.env.PATH ?? ""].join(":");
 
-function spawnClaude(prompt: string): void {
-	Max.post("Running claude...");
+interface ClaudeJsonResult {
+	type: "result";
+	subtype: string;
+	is_error: boolean;
+	result?: string;
+	session_id: string;
+}
 
-	const child = spawn(
-		"claude",
-		[
-			"--print",
-			prompt,
-			"--permission-mode",
-			"bypassPermissions",
-			"--mcp-config",
-			MCP_CONFIG,
-			"--output-format",
-			"text",
-			"--append-system-prompt",
-			SYSTEM_PROMPT,
-		],
-		{
-			cwd: PROJECT_ROOT,
-			env: { ...process.env, PATH: ENRICHED_PATH },
-			// no shell:true — args passed directly, no quoting issues
-		},
-	);
+function spawnClaude(prompt: string): void {
+	const args = [
+		"--print",
+		prompt,
+		"--permission-mode",
+		"bypassPermissions",
+		"--mcp-config",
+		MCP_CONFIG,
+		"--output-format",
+		"json",
+		"--append-system-prompt",
+		SYSTEM_PROMPT,
+	];
+
+	if (currentSessionId) {
+		args.push("--resume", currentSessionId);
+		Max.post(`Running claude (resume ${currentSessionId.slice(0, 8)}…)`);
+	} else {
+		currentSessionId = randomUUID();
+		args.push("--session-id", currentSessionId);
+		Max.post(`Running claude (new session ${currentSessionId.slice(0, 8)}…)`);
+	}
+
+	const child = spawn("claude", args, {
+		cwd: PROJECT_ROOT,
+		env: { ...process.env, PATH: ENRICHED_PATH },
+	});
 
 	child.stdin.end(); // prevent "No stdin data received" warning
 
@@ -85,17 +100,25 @@ function spawnClaude(prompt: string): void {
 
 	child.on("close", (code: number | null) => {
 		clearTimeout(timeout);
-		const response = Buffer.concat(stdoutChunks).toString().trim();
+		const raw = Buffer.concat(stdoutChunks).toString().trim();
 		if (code !== 0) {
 			Max.post(`Claude exited with code ${code}`);
 			return;
 		}
-		if (response) {
-			Max.post("--- Claude ---");
-			for (const line of response.split("\n")) {
-				if (line.trim()) Max.post(line);
+		if (!raw) return;
+
+		try {
+			const parsed = JSON.parse(raw) as ClaudeJsonResult;
+			if (parsed.is_error) {
+				Max.post(`Claude error: ${parsed.result ?? "(no message)"}`);
+				return;
 			}
-			Max.post("--- end ---");
+			// Keep session_id from Claude in case it differs (forked session, etc).
+			if (parsed.session_id) currentSessionId = parsed.session_id;
+			const text = parsed.result?.trim() ?? "";
+			if (text) Max.outlet("reply", text);
+		} catch (e) {
+			Max.post(`Failed to parse claude JSON: ${e}`);
 		}
 	});
 
@@ -105,10 +128,14 @@ function spawnClaude(prompt: string): void {
 }
 
 Max.addHandlers({
-	string: (prompt: string) => {
-		pendingPrompts.push(prompt);
+	prompt: (text: string) => {
+		pendingPrompts.push(text);
 		Max.outlet("bridge", "getcontext");
 		Max.post("Getting patch context...");
+	},
+	clear: () => {
+		currentSessionId = null;
+		Max.post("Session cleared");
 	},
 	bridgeResponse: (type: string, ...data: unknown[]) => {
 		if (type === "context" && data[0]) {
@@ -132,5 +159,5 @@ Max.addHandlers({
 });
 
 Max.post(
-	"Max → Claude Code bridge ready. Send a message to ask about the patch.",
+	"Max Assistant ready. Type a prompt and press Enter to ask about the patch.",
 );

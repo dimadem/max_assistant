@@ -4,7 +4,7 @@
 	"private": true,
 	"scripts": {
 		"dev": "bun run src/assistant.ts",
-		"build": "bun build src/assistant.ts --outfile assistant.js --target node --external max-api",
+		"build": "bun build src/assistant.ts --outfile code/assistant.js --target node --external max-api",
 		"mcp": "bun run src/mcp-server.ts",
 		"format": "bunx biome format --write",
 		"lint": "bunx biome lint --write",
@@ -22,8 +22,8 @@
 	},
 	"knip": {
 		"ignore": [
-			"assistant.js",
-			"bridge.js"
+			"code/assistant.js",
+			"javascript/bridge.js"
 		]
 	},
 	"dependencies": {
