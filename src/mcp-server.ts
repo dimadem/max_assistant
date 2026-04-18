@@ -1,10 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import type { PatchContext } from "./types/max.ts";
+import {
+	convertMaxpat,
+	type PatchContext,
+	type RawMaxpat,
+} from "./types/max.ts";
 
 const CONTEXT_FILE = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -14,6 +19,42 @@ const CONTEXT_FILE = join(
 
 const MAX_REFPAGES =
 	"/Applications/Max.app/Contents/Resources/C74/docs/refpages";
+
+const MAX_APP_HELP = "/Applications/Max.app/Contents/Resources/C74/help";
+const MAX_USER_ROOTS = [
+	join(homedir(), "Documents/Max 9/Library"),
+	join(homedir(), "Documents/Max 9/Packages"),
+	"/Users/Shared/Max 9/Packages",
+];
+
+function findHelpPatch(maxclass: string): string | null {
+	const filename = `${maxclass}.maxhelp`;
+
+	if (existsSync(MAX_APP_HELP)) {
+		try {
+			const flat = join(MAX_APP_HELP, filename);
+			if (existsSync(flat)) return flat;
+			for (const entry of readdirSync(MAX_APP_HELP, { withFileTypes: true })) {
+				if (!entry.isDirectory()) continue;
+				const p = join(MAX_APP_HELP, entry.name, filename);
+				if (existsSync(p)) return p;
+			}
+		} catch {}
+	}
+
+	for (const root of MAX_USER_ROOTS) {
+		if (!existsSync(root)) continue;
+		try {
+			for (const entry of readdirSync(root, { withFileTypes: true })) {
+				if (!entry.isDirectory()) continue;
+				const p = join(root, entry.name, "help", filename);
+				if (existsSync(p)) return p;
+			}
+		} catch {}
+	}
+
+	return null;
+}
 
 function loadContext(): PatchContext {
 	try {
@@ -42,8 +83,8 @@ server.tool(
 );
 
 server.tool(
-	"get_connections",
-	"Get all inputs and outputs for a specific object by its id (from get_patch_context).",
+	"get_object_connections",
+	"Get all inputs and outputs for a single object, identified by its id from get_patch_context.",
 	{
 		id: z.string().describe("Object varname/id from get_patch_context"),
 	},
@@ -119,6 +160,41 @@ server.tool(
 		}
 		return {
 			content: [{ type: "text", text: xml }],
+		};
+	},
+);
+
+server.tool(
+	"get_object_help",
+	"Get the help patch (.maxhelp) for a Max MSP object: a working example patch showing how the object is used. Returns normalized { boxes, lines } in the same shape as get_patch_context, plus the source path. Use after get_object_docs when you want a concrete usage example.",
+	{
+		maxclass: z
+			.string()
+			.describe("Object type, e.g. 'cycle~', 'button', 'route'"),
+	},
+	async ({ maxclass }) => {
+		const path = findHelpPatch(maxclass);
+		if (!path) {
+			return {
+				content: [
+					{ type: "text", text: `No help patch found for "${maxclass}"` },
+				],
+			};
+		}
+		let raw: RawMaxpat;
+		try {
+			raw = JSON.parse(readFileSync(path, "utf-8"));
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			return {
+				content: [{ type: "text", text: `Failed to parse ${path}: ${msg}` }],
+			};
+		}
+		const ctx = convertMaxpat(raw);
+		return {
+			content: [
+				{ type: "text", text: JSON.stringify({ path, ...ctx }, null, 2) },
+			],
 		};
 	},
 );

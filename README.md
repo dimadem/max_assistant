@@ -10,8 +10,9 @@ The user types a question in the `[jweb]` chat. `assistant.ts` (running
 in `[node.script]`) asks `[v8 bridge.js]` for the top-level patcher's
 file path, reads the `.maxpat` JSON, writes a normalised snapshot to
 `patch-context.json`, and spawns `claude --mcp-config .mcp.json`. Three
-MCP tools (`get_patch_context`, `get_connections`, `get_object_docs`)
-let the agent inspect the live patch and the Max reference pages. The
+MCP tools (`get_patch_context`, `get_object_connections`,
+`get_object_docs`, `get_object_help`) let the agent inspect the live
+patch, the Max reference pages, and help (example) patches. The
 reply is sent back to `[jweb]` and appended to the chat.
 
 ## Features
@@ -20,6 +21,9 @@ reply is sent back to `[jweb]` and appended to the chat.
   per-object inputs/outputs.
 - **Max reference lookup** — MCP tool reads `*.maxref.xml` for any
   `maxclass`.
+- **Help patch lookup** — MCP tool returns the normalised contents of
+  the `.maxhelp` example patch for a given `maxclass` (searches the Max
+  application bundle and installed packages).
 - **Session continuity** — subsequent prompts resume the same Claude
   session until `new chat`.
 - **Typed protocol** — selector constants and JSON text codec in
