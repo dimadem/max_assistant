@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { convertMaxpat, type PatchContext, type RawMaxpat } from "./types/max.ts";
+import {
+	convertMaxpat,
+	type PatchContext,
+	type RawMaxpat,
+} from "./types/max.ts";
 
 const CONTEXT_FILE = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -183,9 +187,7 @@ server.tool(
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			return {
-				content: [
-					{ type: "text", text: `Failed to parse ${path}: ${msg}` },
-				],
+				content: [{ type: "text", text: `Failed to parse ${path}: ${msg}` }],
 			};
 		}
 		const ctx = convertMaxpat(raw);
