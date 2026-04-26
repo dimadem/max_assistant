@@ -25,10 +25,6 @@ function topLevel(p) {
 	return p;
 }
 
-function targetPatcher() {
-	return topLevel(this.patcher);
-}
-
 // ---------- getcontext (existing handler) -------------------------------
 
 function getcontext() {
@@ -90,7 +86,7 @@ function pollCommands() {
 			post("bridge: bad command JSON: " + e + " line=" + trimmed + "\n");
 			continue;
 		}
-		if (cmd && cmd.requestId && !seenIds[cmd.requestId]) {
+		if (cmd?.requestId && !seenIds[cmd.requestId]) {
 			seenIds[cmd.requestId] = true;
 			executeCommand(cmd);
 		}
@@ -153,12 +149,10 @@ function rectEquals(a, b) {
 function findByRect(target, rect) {
 	var found = null;
 	target.applyif(
-		function (obj) {
+		(obj) => {
 			if (!found) found = obj;
 		},
-		function (obj) {
-			return !found && rectEquals(obj.rect, rect);
-		},
+		(obj) => !found && rectEquals(obj.rect, rect),
 	);
 	return found;
 }
@@ -166,12 +160,12 @@ function findByRect(target, rect) {
 function resolveById(target, id) {
 	if (!id) return null;
 	var own = mcpObjects[id];
-	if (own && own.maxclass) return own;
+	if (own?.maxclass) return own;
 	var byName = target.getnamed(id);
-	if (byName && byName.maxclass) return byName;
+	if (byName?.maxclass) return byName;
 	if (/^obj-\d+$/.test(id)) {
 		var ctx = readContextSnapshot();
-		if (ctx && ctx.boxes) {
+		if (ctx?.boxes) {
 			for (var i = 0; i < ctx.boxes.length; i++) {
 				if (ctx.boxes[i].id === id) {
 					return findByRect(target, ctx.boxes[i].rect);
@@ -185,7 +179,7 @@ function resolveById(target, id) {
 function nameInUse(target, name) {
 	var existing = target.getnamed(name);
 	// In v8, getnamed returns a Maxobj-like even for missing names; check maxclass.
-	return !!(existing && existing.maxclass);
+	return !!existing?.maxclass;
 }
 
 function nextMcpName(target) {
@@ -225,7 +219,7 @@ function handleCreateObject(target, cmd) {
 		});
 		return;
 	}
-	if (!obj || !obj.maxclass) {
+	if (!obj?.maxclass) {
 		sendResult(cmd.requestId, target, {
 			ok: false,
 			error: "unknown maxclass: " + classname,
@@ -268,9 +262,7 @@ function handleConnectObjects(target, cmd) {
 		sendResult(cmd.requestId, target, {
 			ok: false,
 			error:
-				"source object not found: " +
-				cmd.srcId +
-				" — try get_patch_context",
+				"source object not found: " + cmd.srcId + " — try get_patch_context",
 		});
 		return;
 	}
