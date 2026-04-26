@@ -36,3 +36,13 @@ CLAUDE.md
 # Finder (MacOS) folder config
 .DS_Store
 patch-context.json
+
+# Loop / agent scratch state (not part of the repo)
+.agents
+.claude
+issues
+plans
+ralph
+skills-lock.json
+commands.ndjson
+command-results.ndjson

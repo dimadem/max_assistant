@@ -128,9 +128,7 @@ server.tool(
 	"create_object",
 	"Create a new Max object in the patch. `text` is the full Box.text (e.g. 'cycle~ 440', 'button', 'message foo bar'). `x`/`y` are absolute pixels. Optionally pass `varname` to give the new object a specific name; otherwise an auto-generated `mcp_<n>` name is assigned. After this call, the next get_patch_context reflects the new object.",
 	{
-		text: z
-			.string()
-			.describe("Full text as in Box.text, e.g. 'cycle~ 440'"),
+		text: z.string().describe("Full text as in Box.text, e.g. 'cycle~ 440'"),
 		x: z.number().describe("X coordinate in pixels (top-left corner)"),
 		y: z.number().describe("Y coordinate in pixels (top-left corner)"),
 		varname: z

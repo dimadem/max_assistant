@@ -3,7 +3,7 @@
  * Splits on whitespace; numeric tokens are coerced via `+t`.
  */
 
-export interface ParsedObjectText {
+interface ParsedObjectText {
 	classname: string;
 	args: (string | number)[];
 }

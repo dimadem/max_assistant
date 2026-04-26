@@ -5,7 +5,11 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { convertMaxpat, type PatchContext, type RawMaxpat } from "./types/max.ts";
+import {
+	convertMaxpat,
+	type PatchContext,
+	type RawMaxpat,
+} from "./types/max.ts";
 
 export function syncContext(
 	maxpatPath: string,

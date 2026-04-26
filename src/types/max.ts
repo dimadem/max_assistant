@@ -4,13 +4,13 @@
  */
 
 /** [x, y, width, height] in pixels */
-export type Rect = [number, number, number, number];
+type Rect = [number, number, number, number];
 
 /** [objectIndex, portNumber] */
-export type Port = [number, number];
+type Port = [number, number];
 
 /** A single object (box) in the patch */
-export interface Box {
+interface Box {
 	/** varname if set, otherwise the internal id (e.g. "obj-2") */
 	id: string;
 	/** Object type, e.g. "newobj", "message", "button", "cycle~" */
@@ -23,7 +23,7 @@ export interface Box {
 }
 
 /** A patchcord between two boxes */
-export interface Connection {
+interface Connection {
 	src: Port;
 	dst: Port;
 }

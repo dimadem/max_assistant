@@ -12,7 +12,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const POLL_INTERVAL_MS = 50;
 const DEFAULT_TIMEOUT_MS = 2000;
 
-export interface CommandResult {
+interface CommandResult {
 	requestId: string;
 	ok: boolean;
 	error?: string;

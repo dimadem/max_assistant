@@ -19,13 +19,14 @@
 	"devDependencies": {
 		"@biomejs/biome": "2.4.11",
 		"@types/max-api": "^2.0.3",
-		"bun-types": "^1.3.12",
-		"knip": "^6.4.1",
-		"typescript": "^6.0.2"
+		"bun-types": "^1.3.13",
+		"knip": "^6.7.0",
+		"typescript": "^6.0.3"
 	},
 	"knip": {
 		"entry": [
-			"src/ui/app.ts"
+			"src/ui/app.ts",
+			"src/**/*.test.ts"
 		],
 		"project": [
 			"src/**/*.ts",
