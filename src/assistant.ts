@@ -54,12 +54,27 @@ const extraPaths = [
 ];
 const ENRICHED_PATH = [...extraPaths, process.env.PATH ?? ""].join(":");
 
-interface ClaudeJsonResult {
-	type: "result";
-	subtype: string;
-	is_error: boolean;
-	result?: string;
-	session_id: string;
+type ContentBlock =
+	| { type: "text"; text: string }
+	| { type: "tool_use"; id: string; name: string; input: unknown }
+	| { type: "tool_result"; tool_use_id: string };
+
+type StreamEvent =
+	| { type: "system"; subtype: string }
+	| { type: "assistant"; message: { content: ContentBlock[] } }
+	| { type: "user"; message: { content: ContentBlock[] } }
+	| {
+			type: "result";
+			subtype: string;
+			is_error: boolean;
+			result?: string;
+			session_id: string;
+	  };
+
+// MCP tools arrive as "mcp__max-msp__create_object" — keep the trailing name.
+function shortToolName(name: string): string {
+	const parts = name.split("__");
+	return parts[parts.length - 1] ?? name;
 }
 
 // Text payloads go through encodeText so multi-word strings survive Max's
@@ -90,7 +105,8 @@ function spawnClaude(prompt: string): void {
 		"--mcp-config",
 		MCP_CONFIG,
 		"--output-format",
-		"json",
+		"stream-json",
+		"--verbose",
 		"--append-system-prompt",
 		SYSTEM_PROMPT,
 	];
@@ -111,9 +127,54 @@ function spawnClaude(prompt: string): void {
 
 	child.stdin.end(); // prevent "No stdin data received" warning
 
-	const stdoutChunks: Buffer[] = [];
+	let stdoutBuffer = "";
 
-	child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+	const handleEvent = (ev: StreamEvent): void => {
+		switch (ev.type) {
+			case "assistant": {
+				const toolUse = ev.message.content.find((c) => c.type === "tool_use");
+				if (toolUse) {
+					setStatus(`claude · ${shortToolName(toolUse.name)}`);
+					return;
+				}
+				if (ev.message.content.some((c) => c.type === "text")) {
+					setStatus("claude · writing…");
+				}
+				return;
+			}
+			case "result": {
+				if (ev.is_error) {
+					const msg = `Claude error: ${ev.result ?? "(no message)"}`;
+					Max.post(msg);
+					sendText(UI_IN.appendError, msg);
+					setStatus("ready");
+					return;
+				}
+				// Keep session_id from Claude in case it differs (forked session, etc).
+				currentSessionId = ev.session_id;
+				const text = ev.result?.trim() ?? "";
+				if (text) sendText(UI_IN.appendAssistant, text);
+				setStatus("ready");
+				return;
+			}
+			// "system" / "user" events are not used here.
+		}
+	};
+
+	child.stdout.on("data", (chunk: Buffer) => {
+		stdoutBuffer += chunk.toString();
+		const lines = stdoutBuffer.split("\n");
+		stdoutBuffer = lines.pop() ?? "";
+		for (const line of lines) {
+			const trimmed = line.trim();
+			if (!trimmed) continue;
+			try {
+				handleEvent(JSON.parse(trimmed) as StreamEvent);
+			} catch (e) {
+				Max.post(`stream parse error: ${e}; line=${trimmed.slice(0, 200)}`);
+			}
+		}
+	});
 
 	child.stderr.on("data", (chunk: Buffer) => {
 		const line = chunk.toString().trim();
@@ -128,39 +189,13 @@ function spawnClaude(prompt: string): void {
 	child.on("close", (code: number | null) => {
 		clearTimeout(timeout);
 		setBusy(false);
-		const raw = Buffer.concat(stdoutChunks).toString().trim();
 		if (code !== 0) {
 			const msg = `Claude exited with code ${code}`;
 			Max.post(msg);
 			sendText(UI_IN.appendError, msg);
 			setStatus("ready");
-			return;
 		}
-		if (!raw) {
-			setStatus("ready");
-			return;
-		}
-
-		try {
-			const parsed = JSON.parse(raw) as ClaudeJsonResult;
-			if (parsed.is_error) {
-				const msg = `Claude error: ${parsed.result ?? "(no message)"}`;
-				Max.post(msg);
-				sendText(UI_IN.appendError, msg);
-				setStatus("ready");
-				return;
-			}
-			// Keep session_id from Claude in case it differs (forked session, etc).
-			if (parsed.session_id) currentSessionId = parsed.session_id;
-			const text = parsed.result?.trim() ?? "";
-			if (text) sendText(UI_IN.appendAssistant, text);
-			setStatus("ready");
-		} catch (e) {
-			const msg = `Failed to parse claude JSON: ${e}`;
-			Max.post(msg);
-			sendText(UI_IN.appendError, msg);
-			setStatus("ready");
-		}
+		// Success path: the "result" event already updated UI + status.
 	});
 
 	child.on("error", (err: Error) => {

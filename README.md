@@ -218,3 +218,84 @@ Elements — are available against the live `jweb` page.
 covers `[js]` / `[v8]` / `[jsui]` — a different runtime; its `Max`
 classes are not available inside `jweb`.
 
+## Project layout
+
+```
+src/
+  assistant.ts          entry point for [node.script]; spawns claude, routes UI
+  mcp-server.ts         MCP server with three tools (stdio transport)
+  types/
+    max.ts              RawMaxpat / PatchContext + convertMaxpat
+    protocol.ts         Max ↔ jweb selectors and JSON text codec
+  ui/
+    app.ts              jweb entry: bindInlet / outlet handlers
+scripts/
+  ui-server.ts          Bun static server for UI (port 5173)
+code/
+  assistant.js          build artifact — loaded by [node.script]
+javascript/
+  bridge.js             [v8] code; walks to top-level patcher and returns filepath
+ui/
+  index.html            chat layout (header / log / input / status-bar)
+  style.css             flat grey-white palette, system mono font
+  app.js                build artifact — loaded by [jweb]
+patchers/
+  assistant.maxpat      the single user-facing patch
+docs/                   Max 9 PDF reference (see Documentation below)
+.mcp.json               MCP server config for claude
+patch-context.json      auto-generated patch snapshot (gitignored)
+```
+
+`code/assistant.js` and `ui/app.js` are build artifacts tracked in git so the
+package works without Bun installed (Max loads them directly). Source lives in
+`src/` — edit there and run `bun run build`.
+
+## Request flow
+
+1. User submits text in `[jweb]` → `outlet("prompt", text)`.
+2. `assistant.ts` queues the prompt, sends `busy 1` + `status "getting patch context…"` + `bridge getcontext` to `[v8]`.
+3. `bridge.js` walks to the top-level patcher, calls `write`, returns the filepath.
+4. `assistant.ts` reads the `.maxpat`, normalises it via `convertMaxpat`, writes `patch-context.json`.
+5. Spawns `claude --print --mcp-config .mcp.json --session-id|--resume`.
+6. Parses the JSON result, sends `appendAssistant {"text":"…"}` to `[jweb]`; sends `busy 0` + `status "ready"`.
+
+The Claude session ID is kept in `currentSessionId` for conversation continuity.
+A `clear` message resets it.
+
+## MCP tools
+
+Defined in `src/mcp-server.ts`; spawned by `claude` via `.mcp.json`; read from
+`patch-context.json` (refreshed each prompt):
+
+- `get_patch_context` — all objects and connections in the current patch
+- `get_connections(id)` — inputs/outputs of a specific object by id or varname
+- `get_object_docs(maxclass)` — Max reference page for an object type (XML from `/Applications/Max.app/Contents/Resources/C74/docs/refpages`)
+
+## Documentation (`docs/`)
+
+| File | Contents | When to use |
+| ---- | -------- | ----------- |
+| `Max9-UserGuide-en.pdf` | Full Max 9 guide | UI, patching, objects, **jweb API**, Presentation Mode |
+| `Max9-JS-API-en.pdf` | JS API for `[js]` / `[jsui]` / `[v8]` | Code inside Max `js`, `jsui`, `v8`, `v8.codebox` objects |
+| `Max9-NodeForMax-API-en.pdf` | Node for Max (`max-api`) | Node.js ↔ Max communication (`Max.outlet`, handlers) |
+| `Max9-LOM-en.pdf` | Live Object Model | Working with Ableton Live via Max for Live |
+
+Read PDFs with the `Read` tool and `pages: "1-20"` (20-page maximum per call).
+
+## Bun runtime
+
+Use Bun commands instead of Node equivalents:
+
+- `bun <file>` instead of `node` / `ts-node`
+- `bun install` / `bun run <script>` / `bunx <pkg>`
+- `bun test` instead of jest / vitest
+- `.env` is loaded automatically — no dotenv needed
+
+Preferred Bun APIs:
+
+- `Bun.serve()` instead of express
+- `bun:sqlite` instead of better-sqlite3
+- `Bun.file` instead of `node:fs` readFile / writeFile
+- `WebSocket` built-in — no `ws` package needed
+- `` Bun.$`cmd` `` instead of execa
+
