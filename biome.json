@@ -33,25 +33,11 @@
 	},
 	"overrides": [
 		{
-			"includes": ["bridge.js"],
+			"includes": ["**/bridge.js"],
 			"linter": {
 				"rules": {
 					"correctness": {
 						"noUndeclaredVariables": "off"
-					}
-				}
-			}
-		},
-		{
-			"includes": ["bridge-getcontext.js"],
-			"linter": {
-				"rules": {
-					"correctness": {
-						"noUndeclaredVariables": "off",
-						"noInnerDeclarations": "off"
-					},
-					"style": {
-						"useTemplate": "off"
 					}
 				}
 			}
