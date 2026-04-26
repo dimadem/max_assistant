@@ -1,16 +1,18 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Max from "max-api";
-import { convertMaxpat, type RawMaxpat } from "./types/max.ts";
+import { syncContext } from "./patch-sync.ts";
 import { encodeText, UI_IN, type UIInSelector } from "./types/protocol.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 // In dev: scriptDir = .../src — go up. After build: scriptDir = .../code — go up.
 const PROJECT_ROOT = join(scriptDir, "..");
 const contextFile = join(PROJECT_ROOT, "patch-context.json");
+const COMMANDS_FILE = join(PROJECT_ROOT, "commands.ndjson");
+const RESULTS_FILE = join(PROJECT_ROOT, "command-results.ndjson");
 const MCP_CONFIG = join(PROJECT_ROOT, ".mcp.json");
 const UI_URL = `file://${join(PROJECT_ROOT, "ui", "index.html")}`;
 
@@ -24,15 +26,17 @@ let currentSessionId: string | null = null;
 
 const SYSTEM_PROMPT = [
 	"You are an expert Max/MSP assistant embedded inside a live Max patch.",
-	"Use the provided MCP tools to inspect the current patch before answering:",
+	"Use the provided MCP tools to inspect and modify the current patch:",
 	"  • get_patch_context  — full list of objects and connections",
 	"  • get_connections    — inputs/outputs for a specific object by id",
 	"  • get_object_docs    — Max reference docs (inlets, outlets, messages, attributes) for any object type",
+	"  • create_object      — create a new Max object at (x,y) with full Box.text",
 	"Max/MSP conventions to keep in mind:",
 	"  • Signal objects end with ~ (cycle~, dac~, selector~, etc.)",
 	"  • Data flows left-to-right through inlets/outlets",
 	"  • 'maxclass' is the object type; 'text' is the full typed argument string",
 	"  • Connections are indexed: outlet 0 is leftmost, inlet 0 is leftmost",
+	"After any mutation tool, the patch-context is refreshed automatically; call get_patch_context again only if you need updated ids.",
 	"Be concise. When referencing objects use their text or id.",
 ].join(" ");
 
@@ -68,6 +72,11 @@ function setBusy(on: boolean): void {
 
 function setStatus(text: string): void {
 	sendText(UI_IN.status, text);
+}
+
+// HFS path "Macintosh HD:/Users/..." → POSIX path. No-op for already-POSIX paths.
+function hfsToPosix(path: string): string {
+	return path.replace(/^[^/]*:/, "");
 }
 
 function spawnClaude(prompt: string): void {
@@ -166,6 +175,12 @@ function joinArgs(args: unknown[]): string {
 	return args.map(String).join(" ");
 }
 
+interface CommandSyncedPayload {
+	requestId: string;
+	path: string;
+	result: Record<string, unknown>;
+}
+
 Max.addHandlers({
 	prompt: (...args: unknown[]) => {
 		const text = joinArgs(args).trim();
@@ -188,11 +203,8 @@ Max.addHandlers({
 			const prompt = pendingPrompts.shift();
 			if (!prompt) return;
 			try {
-				// Max returns HFS path "Macintosh HD:/Users/..." — strip volume prefix
-				const patchPath = (data[0] as string).replace(/^[^/]*:/, "");
-				const raw = JSON.parse(readFileSync(patchPath, "utf-8")) as RawMaxpat;
-				const ctx = convertMaxpat(raw);
-				writeFileSync(contextFile, JSON.stringify(ctx, null, 2));
+				const patchPath = hfsToPosix(data[0] as string);
+				const ctx = syncContext(patchPath, contextFile);
 				setStatus(
 					`running claude · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`,
 				);
@@ -206,7 +218,44 @@ Max.addHandlers({
 			}
 		}
 	},
+	commandSynced: (...args: unknown[]) => {
+		const json = joinArgs(args);
+		let payload: CommandSyncedPayload;
+		try {
+			payload = JSON.parse(json) as CommandSyncedPayload;
+		} catch (e) {
+			Max.post(`commandSynced parse error: ${e}; raw=${json}`);
+			return;
+		}
+		const { requestId, path, result } = payload;
+		try {
+			syncContext(hfsToPosix(path), contextFile);
+		} catch (e) {
+			Max.post(`syncContext failed after command ${requestId}: ${e}`);
+		}
+		try {
+			appendFileSync(
+				RESULTS_FILE,
+				`${JSON.stringify({ requestId, ...result })}\n`,
+			);
+		} catch (e) {
+			Max.post(`failed to append command-results.ndjson: ${e}`);
+		}
+	},
 });
+
+// Truncate channel files at startup so stale entries from previous sessions
+// don't pollute polling. Both files are append-only during a session.
+try {
+	writeFileSync(COMMANDS_FILE, "");
+	writeFileSync(RESULTS_FILE, "");
+} catch (e) {
+	Max.post(`could not init command channel files: ${e}`);
+}
+
+// Tell [v8] where the project root is so it can locate commands.ndjson and
+// start its command poller. Sent before the first prompt.
+Max.outlet("bridge", "config", PROJECT_ROOT);
 
 // Tell [jweb] which page to load. Doing it from here (instead of hardcoding
 // @url in the .maxpat) keeps the project portable — the path is computed

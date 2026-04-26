@@ -4,13 +4,14 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { sendCommand } from "./command-channel.ts";
+import { parseObjectText } from "./parse-object-text.ts";
 import type { PatchContext } from "./types/max.ts";
 
-const CONTEXT_FILE = join(
-	dirname(fileURLToPath(import.meta.url)),
-	"..",
-	"patch-context.json",
-);
+const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const CONTEXT_FILE = join(PROJECT_ROOT, "patch-context.json");
+const COMMANDS_FILE = join(PROJECT_ROOT, "commands.ndjson");
+const RESULTS_FILE = join(PROJECT_ROOT, "command-results.ndjson");
 
 const MAX_REFPAGES =
 	"/Applications/Max.app/Contents/Resources/C74/docs/refpages";
@@ -119,6 +120,47 @@ server.tool(
 		}
 		return {
 			content: [{ type: "text", text: xml }],
+		};
+	},
+);
+
+server.tool(
+	"create_object",
+	"Create a new Max object in the patch. `text` is the full Box.text (e.g. 'cycle~ 440', 'button', 'message foo bar'). `x`/`y` are absolute pixels. Optionally pass `varname` to give the new object a specific name; otherwise an auto-generated `mcp_<n>` name is assigned. After this call, the next get_patch_context reflects the new object.",
+	{
+		text: z
+			.string()
+			.describe("Full text as in Box.text, e.g. 'cycle~ 440'"),
+		x: z.number().describe("X coordinate in pixels (top-left corner)"),
+		y: z.number().describe("Y coordinate in pixels (top-left corner)"),
+		varname: z
+			.string()
+			.optional()
+			.describe(
+				"Optional varname for the new object. Must be unique in the patch.",
+			),
+	},
+	async ({ text, x, y, varname }) => {
+		const { classname, args } = parseObjectText(text);
+		if (!classname) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify({ ok: false, error: "empty text" }),
+					},
+				],
+			};
+		}
+		const result = await sendCommand(
+			COMMANDS_FILE,
+			RESULTS_FILE,
+			"create_object",
+			{ classname, args, x, y, varname, text },
+		);
+		const { requestId: _id, ...payload } = result;
+		return {
+			content: [{ type: "text", text: JSON.stringify(payload) }],
 		};
 	},
 );
