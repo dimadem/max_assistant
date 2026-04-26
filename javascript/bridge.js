@@ -109,6 +109,8 @@ function executeCommand(cmd) {
 		handleCreateObject(target, cmd);
 	} else if (cmd.type === "connect_objects") {
 		handleConnectObjects(target, cmd);
+	} else if (cmd.type === "delete_object") {
+		handleDeleteObject(target, cmd);
 	} else {
 		sendResult(cmd.requestId, target, {
 			ok: false,
@@ -303,6 +305,31 @@ function handleConnectObjects(target, cmd) {
 		});
 		return;
 	}
+	target.message("write");
+	sendResult(cmd.requestId, target, { ok: true });
+}
+
+function handleDeleteObject(target, cmd) {
+	const obj = resolveById(target, cmd.id);
+	if (!obj) {
+		sendResult(cmd.requestId, target, {
+			ok: false,
+			error: `object not found: ${cmd.id} — try get_patch_context`,
+		});
+		return;
+	}
+	try {
+		target.remove(obj);
+	} catch (e) {
+		sendResult(cmd.requestId, target, {
+			ok: false,
+			error: `remove failed: ${e}`,
+		});
+		return;
+	}
+	// Drop our own bookkeeping entry if present (so a future create_object
+	// can reuse the freed mcp_<n> name without colliding via getnamed).
+	if (mcpObjects[cmd.id]) delete mcpObjects[cmd.id];
 	target.message("write");
 	sendResult(cmd.requestId, target, { ok: true });
 }

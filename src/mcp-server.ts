@@ -194,5 +194,25 @@ server.tool(
 	},
 );
 
+server.tool(
+	"delete_object",
+	"Delete an existing Max object from the patch by id (from get_patch_context). Removes the object and any patchcords attached to it. After this call, the next get_patch_context reflects the deletion.",
+	{
+		id: z.string().describe("Object id/varname from get_patch_context"),
+	},
+	async ({ id }) => {
+		const result = await sendCommand(
+			COMMANDS_FILE,
+			RESULTS_FILE,
+			"delete_object",
+			{ id },
+		);
+		const { requestId: _id, ...payload } = result;
+		return {
+			content: [{ type: "text", text: JSON.stringify(payload) }],
+		};
+	},
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
