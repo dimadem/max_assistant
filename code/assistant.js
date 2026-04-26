@@ -76,6 +76,7 @@ var SYSTEM_PROMPT = [
   "  • get_connections    — inputs/outputs for a specific object by id",
   "  • get_object_docs    — Max reference docs (inlets, outlets, messages, attributes) for any object type",
   "  • create_object      — create a new Max object at (x,y) with full Box.text",
+  "  • connect_objects    — connect srcId.outlet → dstId.inlet (ids from get_patch_context)",
   "Max/MSP conventions to keep in mind:",
   "  • Signal objects end with ~ (cycle~, dac~, selector~, etc.)",
   "  • Data flows left-to-right through inlets/outlets",

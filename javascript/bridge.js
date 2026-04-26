@@ -40,6 +40,7 @@ function getcontext() {
 // ---------- command channel ---------------------------------------------
 
 var COMMANDS_PATH = null;
+var CONTEXT_PATH = null;
 var commandsOffset = 0;
 var seenIds = {};
 var poller = null;
@@ -56,6 +57,7 @@ function config(root) {
 		return;
 	}
 	COMMANDS_PATH = root + "/commands.ndjson";
+	CONTEXT_PATH = root + "/patch-context.json";
 	commandsOffset = 0;
 	if (!poller) {
 		poller = new Task(pollCommands, this);
@@ -110,12 +112,74 @@ function executeCommand(cmd) {
 	var target = topLevel(this.patcher);
 	if (cmd.type === "create_object") {
 		handleCreateObject(target, cmd);
+	} else if (cmd.type === "connect_objects") {
+		handleConnectObjects(target, cmd);
 	} else {
 		sendResult(cmd.requestId, target, {
 			ok: false,
 			error: "unknown command type: " + cmd.type,
 		});
 	}
+}
+
+// ---------- object resolver ---------------------------------------------
+
+function readContextSnapshot() {
+	if (!CONTEXT_PATH) return null;
+	var f = new File(CONTEXT_PATH, "read");
+	if (!f.isopen) return null;
+	var buf = "";
+	while (f.position < f.eof) {
+		var line = f.readline(8192);
+		if (!line) break;
+		buf += line;
+	}
+	f.close();
+	if (!buf) return null;
+	try {
+		return JSON.parse(buf);
+	} catch (e) {
+		post("bridge: failed to parse context snapshot: " + e + "\n");
+		return null;
+	}
+}
+
+function rectEquals(a, b) {
+	return (
+		a && b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]
+	);
+}
+
+function findByRect(target, rect) {
+	var found = null;
+	target.applyif(
+		function (obj) {
+			if (!found) found = obj;
+		},
+		function (obj) {
+			return !found && rectEquals(obj.rect, rect);
+		},
+	);
+	return found;
+}
+
+function resolveById(target, id) {
+	if (!id) return null;
+	var own = mcpObjects[id];
+	if (own && own.maxclass) return own;
+	var byName = target.getnamed(id);
+	if (byName && byName.maxclass) return byName;
+	if (/^obj-\d+$/.test(id)) {
+		var ctx = readContextSnapshot();
+		if (ctx && ctx.boxes) {
+			for (var i = 0; i < ctx.boxes.length; i++) {
+				if (ctx.boxes[i].id === id) {
+					return findByRect(target, ctx.boxes[i].rect);
+				}
+			}
+		}
+	}
+	return null;
 }
 
 function nameInUse(target, name) {
@@ -196,6 +260,76 @@ function handleCreateObject(target, cmd) {
 		numinlets: obj.numinlets,
 		numoutlets: obj.numoutlets,
 	});
+}
+
+function handleConnectObjects(target, cmd) {
+	var src = resolveById(target, cmd.srcId);
+	if (!src) {
+		sendResult(cmd.requestId, target, {
+			ok: false,
+			error:
+				"source object not found: " +
+				cmd.srcId +
+				" — try get_patch_context",
+		});
+		return;
+	}
+	var dst = resolveById(target, cmd.dstId);
+	if (!dst) {
+		sendResult(cmd.requestId, target, {
+			ok: false,
+			error:
+				"destination object not found: " +
+				cmd.dstId +
+				" — try get_patch_context",
+		});
+		return;
+	}
+	var srcOutlet = cmd.srcOutlet;
+	var dstInlet = cmd.dstInlet;
+	if (
+		typeof srcOutlet !== "number" ||
+		srcOutlet < 0 ||
+		srcOutlet >= src.numoutlets
+	) {
+		sendResult(cmd.requestId, target, {
+			ok: false,
+			error:
+				"srcOutlet " +
+				srcOutlet +
+				" out of range (numoutlets=" +
+				src.numoutlets +
+				")",
+		});
+		return;
+	}
+	if (
+		typeof dstInlet !== "number" ||
+		dstInlet < 0 ||
+		dstInlet >= dst.numinlets
+	) {
+		sendResult(cmd.requestId, target, {
+			ok: false,
+			error:
+				"dstInlet " +
+				dstInlet +
+				" out of range (numinlets=" +
+				dst.numinlets +
+				")",
+		});
+		return;
+	}
+	try {
+		target.connect(src, srcOutlet, dst, dstInlet);
+	} catch (e) {
+		sendResult(cmd.requestId, target, {
+			ok: false,
+			error: "connect failed: " + e,
+		});
+		return;
+	}
+	target.message("write");
+	sendResult(cmd.requestId, target, { ok: true });
 }
 
 // Register handlers — top-level `function` declarations don't always reach

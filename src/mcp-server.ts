@@ -165,5 +165,36 @@ server.tool(
 	},
 );
 
+server.tool(
+	"connect_objects",
+	"Connect two existing Max objects with a patchcord. Both ids come from get_patch_context. Outlets/inlets are 0-indexed (0 = leftmost). After this call, the next get_patch_context reflects the new connection.",
+	{
+		srcId: z.string().describe("Source object id from get_patch_context"),
+		srcOutlet: z
+			.number()
+			.int()
+			.nonnegative()
+			.describe("Source outlet, 0-indexed (0 = leftmost)"),
+		dstId: z.string().describe("Destination object id from get_patch_context"),
+		dstInlet: z
+			.number()
+			.int()
+			.nonnegative()
+			.describe("Destination inlet, 0-indexed (0 = leftmost)"),
+	},
+	async ({ srcId, srcOutlet, dstId, dstInlet }) => {
+		const result = await sendCommand(
+			COMMANDS_FILE,
+			RESULTS_FILE,
+			"connect_objects",
+			{ srcId, srcOutlet, dstId, dstInlet },
+		);
+		const { requestId: _id, ...payload } = result;
+		return {
+			content: [{ type: "text", text: JSON.stringify(payload) }],
+		};
+	},
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
