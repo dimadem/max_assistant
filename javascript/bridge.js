@@ -22,7 +22,7 @@ inlets = 1;
 outlets = 1;
 const jsthis = this; // the [v8] object; `this` is not reliable inside callbacks
 
-const VERSION = "v19";
+const VERSION = "v20";
 post(`bridge.js ${VERSION} loaded\n`);
 
 // ---------- helpers ---------------------------------------------------------
@@ -56,12 +56,33 @@ function samePatcher(a, b) {
 	}
 }
 
-function isAlive(p) {
+// A freed Patcher can't be probed safely (any access prints "bad object"),
+// but a Maxobj has `valid`. So remembered patches are entries
+// { p, title, sentinel } and liveness is checked via an object inside them.
+function safeValid(obj) {
 	try {
-		return !!p && p.wind.visible !== undefined;
+		return !!obj && obj.valid === true;
 	} catch (_) {
 		return false;
 	}
+}
+
+function remember(p) {
+	if (!p) return null;
+	let sentinel = null;
+	let title = "";
+	try {
+		const first = p.firstobject;
+		if (first && first.valid) sentinel = first;
+		title = cleanTitle(p.wind.title || p.name || "");
+	} catch (_) {}
+	return { p, title, sentinel };
+}
+
+// Empty patches have no sentinel: assumed alive until the user focuses another
+// patch (the tracker replaces the entry) — they get one after the first edit.
+function alive(e) {
+	return !!e && (e.sentinel ? safeValid(e.sentinel) : true);
 }
 
 function isBogus(obj) {
@@ -75,17 +96,20 @@ function isBogus(obj) {
 // Standalone (assistant.maxpat is its own window) → edit the most recently
 //   focused OTHER patcher window; open a new one only when a mutation needs it.
 
-let createdTarget = null;
-let lastFocused = null; // last patcher window the user was in (not the assistant)
-let pinned = null; // patch locked by the user via 📌 — wins over focus
+let createdTarget = null; // entry: window we opened ourselves
+let lastFocused = null; // entry: last patch window the user was in (not the assistant)
+let pinned = null; // entry: patch locked via 📌 — wins over focus
 
 // max.frontpatcher is null while commands arrive (e.g. while Claude Desktop
 // or the chat's jweb has focus), so remember the user's patch as they work.
-// One property read every 150 ms — no file I/O.
+// Every 150 ms: read the front window (always live) and check sentinels only.
 const focusTracker = new Task(() => {
 	try {
 		const fp = max.frontpatcher;
-		if (fp && !samePatcher(topLevel(fp), ownTop())) lastFocused = topLevel(fp);
+		if (fp) {
+			const top = topLevel(fp);
+			if (!samePatcher(top, ownTop())) lastFocused = remember(top);
+		}
 		reportTarget();
 	} catch (_) {}
 });
@@ -99,12 +123,12 @@ function report() {
 	reportTarget(true);
 }
 function reportTarget(force) {
-	const t = pickTarget(false);
-	let name = "";
-	try {
-		name = t ? cleanTitle(t.wind.title || t.name || "") : "";
-	} catch (_) {}
-	const state = JSON.stringify({ name, pinned: isAlive(pinned), embedded: !isStandalone() });
+	const e = pickEntry();
+	const state = JSON.stringify({
+		name: e ? e.title : isStandalone() ? "" : cleanTitle(ownTop().name || ""),
+		pinned: alive(pinned),
+		embedded: !isStandalone(),
+	});
 	if (force || state !== reported) {
 		reported = state;
 		outlet(0, "target", state);
@@ -112,8 +136,8 @@ function reportTarget(force) {
 }
 
 function pin() {
-	const t = pickTarget(false);
-	if (t && isStandalone()) pinned = t;
+	const e = pickEntry();
+	if (e && isStandalone()) pinned = e;
 	reportTarget(true);
 }
 
@@ -142,26 +166,38 @@ function isStandalone() {
 	return !hostBox() && /^assistant(\.maxpat)?$/.test(ownTop().name || "");
 }
 
+// Standalone mode only: which remembered patch to use (no patcher access).
+function pickEntry() {
+	if (!isStandalone()) return null;
+	if (alive(pinned)) return pinned;
+	if (alive(lastFocused)) return lastFocused;
+	if (alive(createdTarget)) return createdTarget;
+	return null;
+}
+
 function pickTarget(allowCreate) {
 	const own = ownTop();
 	if (!isStandalone()) return own;
-	if (isAlive(pinned)) return pinned;
-
-	let w = max.frontpatcher ? max.frontpatcher.wind : null;
-	let guard = 0;
-	while (w && guard++ < 200) {
-		const p = w.assoc;
-		if (p && !samePatcher(p, own) && w.visible) return p;
-		w = w.next;
-	}
-	if (isAlive(lastFocused)) return lastFocused;
-	if (isAlive(createdTarget)) return createdTarget;
+	const e = pickEntry();
+	if (e) return e.p;
 	if (!allowCreate) return null;
-	createdTarget = new Patcher(80, 80, 780, 620);
-	createdTarget.wind.visible = 1;
-	createdTarget.wind.title = "assistant work";
+	const p = new Patcher(80, 80, 780, 620);
+	p.wind.visible = 1;
+	p.wind.title = "assistant work";
+	createdTarget = remember(p);
+	createdTarget.title = "assistant work";
 	post("bridge: opened a new patcher for the assistant\n");
-	return createdTarget;
+	return p;
+}
+
+// After an edit, give empty remembered patches a sentinel.
+function refreshEntries(target) {
+	for (const e of [pinned, lastFocused, createdTarget]) {
+		if (e && e.p === target && !e.sentinel) {
+			const fresh = remember(target);
+			e.sentinel = fresh?.sentinel || null;
+		}
+	}
 }
 
 // Diagnostics: what [v8] sees when it walks the window list.
@@ -170,8 +206,8 @@ function describeWindows() {
 	const out = {
 		own: own.name,
 		standalone: isStandalone(),
-		lastFocused: isAlive(lastFocused) ? lastFocused.name : null,
-		pinned: isAlive(pinned) ? pinned.name : null,
+		lastFocused: alive(lastFocused) ? lastFocused.title : null,
+		pinned: alive(pinned) ? pinned.title : null,
 		front: null,
 		windows: [],
 	};
@@ -202,7 +238,7 @@ function describeWindows() {
 // and are never reused, so deleting one object can't re-point another id.
 
 let registry = []; // [{ obj, id }]
-let registryOwner = null;
+let registryOwner = ""; // title of the patch the registry belongs to
 let nextObjId = 1;
 
 function idFor(obj) {
@@ -247,12 +283,14 @@ function listObjects(target) {
 
 function snapshot(target) {
 	const objs = listObjects(target);
-	if (!samePatcher(registryOwner, target)) {
+	const owner = remember(target)?.title || "";
+	if (owner !== registryOwner) {
 		registry = [];
 		nextObjId = 1;
-		registryOwner = target;
+		registryOwner = owner;
 	}
-	registry = registry.filter((r) => objs.some((o) => sameObj(o, r.obj)));
+	// drop freed objects BEFORE touching them (avoids "bad object" spam)
+	registry = registry.filter((r) => safeValid(r.obj) && objs.some((o) => sameObj(o, r.obj)));
 
 	const indexOf = (o) => {
 		for (let i = 0; i < objs.length; i++) if (sameObj(objs[i], o)) return i;
@@ -511,6 +549,7 @@ function command(...atoms) {
 		}
 		const target = pickTarget(true);
 		const result = handler(cmd, target);
+		refreshEntries(target);
 		reply({ requestId, ...result, context: snapshot(target) });
 	} catch (e) {
 		post(`bridge: ${cmd.type} failed: ${e}\n${e?.stack || ""}\n`);
@@ -519,9 +558,9 @@ function command(...atoms) {
 }
 
 function reset() {
-	createdTarget = null; // lastFocused is kept: it follows the user, not the chat
+	createdTarget = null; // lastFocused/pinned are kept: they follow the user
 	registry = [];
-	registryOwner = null;
+	registryOwner = "";
 	nextObjId = 1;
 }
 
