@@ -19,7 +19,7 @@ inlets = 1;
 outlets = 1;
 const jsthis = this; // the [v8] object; `this` is not reliable inside callbacks
 
-const VERSION = "v25";
+const VERSION = "v26";
 post(`bridge.js ${VERSION} loaded\n`);
 
 // ---------- helpers ---------------------------------------------------------
@@ -196,13 +196,12 @@ function pickTarget(allowCreate) {
 	return p;
 }
 
-// After an edit, give empty remembered patches a sentinel.
+// After an edit the target is known to be alive: re-pick its sentinel, since
+// the edit may have deleted it (else the patch would look closed) or the patch
+// may have been empty until now.
 function refreshEntries(target) {
 	for (const e of [pinned, lastFocused, createdTarget]) {
-		if (e && e.p === target && !e.sentinel) {
-			const fresh = remember(target);
-			e.sentinel = fresh?.sentinel || null;
-		}
+		if (e && e.p === target) e.sentinel = remember(target)?.sentinel || null;
 	}
 }
 
