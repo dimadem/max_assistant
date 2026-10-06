@@ -21,6 +21,8 @@ interface Box {
 	/** Known for .maxpat files (help patches); not readable from a live [v8] patch */
 	numinlets?: number;
 	numoutlets?: number;
+	/** Selected by the user in the patcher (live patch only) */
+	selected?: boolean;
 }
 
 /** A patchcord between two boxes */

@@ -22,7 +22,7 @@ inlets = 1;
 outlets = 1;
 const jsthis = this; // the [v8] object; `this` is not reliable inside callbacks
 
-const VERSION = "v20";
+const VERSION = "v24";
 post(`bridge.js ${VERSION} loaded\n`);
 
 // ---------- helpers ---------------------------------------------------------
@@ -61,7 +61,7 @@ function samePatcher(a, b) {
 // { p, title, sentinel } and liveness is checked via an object inside them.
 function safeValid(obj) {
 	try {
-		return !!obj && obj.valid === true;
+		return !!obj && !!obj.valid; // Max returns 1, not true
 	} catch (_) {
 		return false;
 	}
@@ -105,16 +105,25 @@ let pinned = null; // entry: patch locked via 📌 — wins over focus
 // Every 150 ms: read the front window (always live) and check sentinels only.
 const focusTracker = new Task(() => {
 	try {
+		trackerStats.ticks++;
 		const fp = max.frontpatcher;
 		if (fp) {
+			trackerStats.seen++;
 			const top = topLevel(fp);
+			trackerStats.lastFront = String(top.name);
 			if (!samePatcher(top, ownTop())) lastFocused = remember(top);
+			else trackerStats.skippedOwn++;
 		}
 		reportTarget();
-	} catch (_) {}
+		trackerError = "";
+	} catch (e) {
+		trackerError = String(e);
+	}
 });
 
 let reported = "";
+let trackerError = "";
+const trackerStats = { ticks: 0, seen: 0, lastFront: "", skippedOwn: 0 };
 function cleanTitle(title) {
 	return String(title).replace(/\s*\((unlocked|presentation|locked)\)\s*$/i, "");
 }
@@ -263,6 +272,14 @@ function xywh(r) {
 	return [round(r[0]), round(r[1]), round(r[2] - r[0]), round(h > 0 ? h : 22)]; // new boxes report 0 height until drawn
 }
 
+function isSelected(obj) {
+	try {
+		return obj.selected === true || obj.selected === 1;
+	} catch (_) {
+		return false;
+	}
+}
+
 function boxText(obj) {
 	try {
 		return obj.boxtext || "";
@@ -301,6 +318,7 @@ function snapshot(target) {
 		maxclass: obj.maxclass,
 		text: boxText(obj) || knownText[obj.varname] || "",
 		rect: xywh(obj.rect),
+		...(isSelected(obj) ? { selected: true } : {}),
 	}));
 	const lines = [];
 	objs.forEach((obj, i) => {
@@ -451,8 +469,7 @@ const handlers = {
 			return {
 				ok: true,
 				context: { patch: "", boxes: [], lines: [] },
-				note: "No patch window found besides the assistant. A new one will be opened on the first mutation.",
-				debug: describeWindows(),
+				note: `No patch window found besides the assistant. A new one will be opened on the first mutation. tracker=${JSON.stringify({ ...trackerStats, trackerError, lastFocused: lastFocused?.title ?? null })}`,
 			};
 		}
 		return { ok: true, context: snapshot(target) };

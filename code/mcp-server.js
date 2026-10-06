@@ -29461,8 +29461,10 @@ function present(ctx, opts = {}) {
       text: b.text,
       ...opts.rect === false ? {} : { rect: b.rect },
       inlets: b.numinlets,
-      outlets: b.numoutlets
+      outlets: b.numoutlets,
+      ...b.selected ? { selected: true } : {}
     })),
+    ...ctx.boxes.some((b) => b.selected) ? { selection: ctx.boxes.filter((b) => b.selected).map((b) => b.id) } : {},
     connections: ctx.lines.map((l) => ({ from: id(l.src[0]), outlet: l.src[1], to: id(l.dst[0]), inlet: l.dst[1] })),
     ...warnings.length ? { warnings } : {}
   };
@@ -29487,6 +29489,8 @@ var READ = { readOnlyHint: true, idempotentHint: true, openWorldHint: false };
 var WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 var DESTROY = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 var INSTRUCTIONS = `Build and inspect Max/MSP patches in the user's running Max.
+
+Selection: objects the user selected in Max are listed in get_patch_context \u2192 \`selection\`. "this / these / the selected / \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u043E\u0435" refers to them; build around or modify them.
 
 Workflow
 1. get_patch_context \u2014 which patch you edit (\`patch\`), objects, connections (by id), warnings.
