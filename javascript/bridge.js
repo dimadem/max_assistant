@@ -10,6 +10,7 @@
  *   create_object    { box?, classname, args | content, x, y, varname? }
  *   connect_objects  { srcId, srcOutlet, dstId, dstInlet }
  *   delete_object    { id }
+ *   disconnect_objects { srcId, srcOutlet, dstId, dstInlet }
  *   create_fragment  { objects:[{name,classname,args,x,y}], connections:[{from,outlet,to,inlet}] }
  *   pin / unpin      lock the target patch (also `pin`/`unpin` messages)
  * Every mutation result carries a fresh `context` snapshot.
@@ -21,7 +22,7 @@ inlets = 1;
 outlets = 1;
 const jsthis = this; // the [v8] object; `this` is not reliable inside callbacks
 
-const VERSION = "v16";
+const VERSION = "v19";
 post(`bridge.js ${VERSION} loaded\n`);
 
 // ---------- helpers ---------------------------------------------------------
@@ -217,6 +218,15 @@ function idFor(obj) {
 	return id;
 }
 
+// Maxobj.rect is [left, top, right, bottom]; expose [x, y, width, height]
+// like .maxpat's patching_rect.
+function xywh(r) {
+	if (!r || r.length < 4) return r;
+	const round = (n) => Math.round(n * 100) / 100;
+	const h = r[3] - r[1];
+	return [round(r[0]), round(r[1]), round(r[2] - r[0]), round(h > 0 ? h : 22)]; // new boxes report 0 height until drawn
+}
+
 function boxText(obj) {
 	try {
 		return obj.boxtext || "";
@@ -252,9 +262,7 @@ function snapshot(target) {
 		id: idFor(obj),
 		maxclass: obj.maxclass,
 		text: boxText(obj) || knownText[obj.varname] || "",
-		rect: obj.rect,
-		numinlets: obj.numinlets,
-		numoutlets: obj.numoutlets,
+		rect: xywh(obj.rect),
 	}));
 	const lines = [];
 	objs.forEach((obj, i) => {
@@ -337,7 +345,7 @@ function createBox(target, spec) {
 	const name = spec.varname || uniqueName(target, spec.name || spec.box);
 	obj.varname = name;
 	knownText[name] = content;
-	return { ok: true, id: name, obj, maxclass: obj.maxclass, numinlets: obj.numinlets, numoutlets: obj.numoutlets };
+	return { ok: true, id: name, obj, maxclass: obj.maxclass };
 }
 
 function createOne(target, spec) {
@@ -371,22 +379,28 @@ function createOne(target, spec) {
 		id: name,
 		obj,
 		maxclass: obj.maxclass,
-		numinlets: obj.numinlets,
-		numoutlets: obj.numoutlets,
 	};
 }
 
+function hasCord(src, outlet, dst, inlet) {
+	return (src.patchcords?.outputs || []).some(
+		(c) => c.srcoutlet === outlet && c.dstinlet === inlet && sameObj(c.dstobject, dst),
+	);
+}
+
+// Inlet/outlet counts aren't readable from [v8] (Max 9.2), so connect and
+// then verify the cord exists — Max silently ignores out-of-range ports.
 function connectObjs(target, src, srcOutlet, dst, dstInlet) {
-	if (typeof srcOutlet !== "number" || srcOutlet < 0 || srcOutlet >= src.numoutlets) {
-		return `outlet ${srcOutlet} out of range (numoutlets=${src.numoutlets})`;
-	}
-	if (typeof dstInlet !== "number" || dstInlet < 0 || dstInlet >= dst.numinlets) {
-		return `inlet ${dstInlet} out of range (numinlets=${dst.numinlets})`;
-	}
+	if (typeof srcOutlet !== "number" || srcOutlet < 0) return `invalid outlet ${srcOutlet}`;
+	if (typeof dstInlet !== "number" || dstInlet < 0) return `invalid inlet ${dstInlet}`;
+	if (hasCord(src, srcOutlet, dst, dstInlet)) return null; // already connected
 	try {
 		target.connect(src, srcOutlet, dst, dstInlet);
 	} catch (e) {
 		return `connect failed: ${e}`;
+	}
+	if (!hasCord(src, srcOutlet, dst, dstInlet)) {
+		return `Max refused the cord (outlet ${srcOutlet} or inlet ${dstInlet} doesn't exist, or a signal outlet → control-only inlet). Check ports with get_object_docs.`;
 	}
 	return null;
 }
@@ -421,6 +435,16 @@ const handlers = {
 		return err ? { ok: false, error: err } : { ok: true };
 	},
 
+	disconnect_objects(cmd, target) {
+		const src = resolveById(target, cmd.srcId);
+		if (!src) return { ok: false, error: `source object not found: ${cmd.srcId}` };
+		const dst = resolveById(target, cmd.dstId);
+		if (!dst) return { ok: false, error: `destination object not found: ${cmd.dstId}` };
+		if (!hasCord(src, cmd.srcOutlet, dst, cmd.dstInlet)) return { ok: false, error: `no patchcord ${cmd.srcId}:${cmd.srcOutlet} → ${cmd.dstId}:${cmd.dstInlet}` };
+		target.disconnect(src, cmd.srcOutlet, dst, cmd.dstInlet);
+		return { ok: true };
+	},
+
 	delete_object(cmd, target) {
 		const obj = resolveById(target, cmd.id);
 		if (!obj) return { ok: false, error: `object not found: ${cmd.id}` };
@@ -436,7 +460,7 @@ const handlers = {
 			const r = createOne(target, spec);
 			if (r.ok) {
 				created[spec.name] = r;
-				objects.push({ name: spec.name, id: r.id, numinlets: r.numinlets, numoutlets: r.numoutlets });
+				objects.push({ name: spec.name, id: r.id });
 				if (r.warning) errors.push(`object "${spec.name}": ${r.warning}`);
 			} else {
 				errors.push(`object "${spec.name}" (${spec.classname || spec.box}): ${r.error}`);
@@ -459,7 +483,7 @@ const handlers = {
 	},
 };
 
-const MUTATIONS = { create_object: 1, connect_objects: 1, delete_object: 1, create_fragment: 1 };
+const MUTATIONS = { create_object: 1, connect_objects: 1, disconnect_objects: 1, delete_object: 1, create_fragment: 1 };
 
 function reply(payload) {
 	outlet(0, "bridgeResult", JSON.stringify(payload));

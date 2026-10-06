@@ -18,8 +18,9 @@ interface Box {
 	/** Full text as typed in the box, e.g. "prepend string" */
 	text: string;
 	rect: Rect;
-	numinlets: number;
-	numoutlets: number;
+	/** Known for .maxpat files (help patches); not readable from a live [v8] patch */
+	numinlets?: number;
+	numoutlets?: number;
 }
 
 /** A patchcord between two boxes */

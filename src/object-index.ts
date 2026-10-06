@@ -133,3 +133,84 @@ export function searchIndex(
 	scored.sort((a, b) => b.score - a.score || a.e.name.localeCompare(b.e.name));
 	return scored.slice(0, limit).map((s) => s.e);
 }
+
+// ---------- compact reference page (for get_object_docs) --------------------
+
+export interface RefSummary {
+	name: string;
+	category: string;
+	digest: string;
+	description: string;
+	inlets: { id: number; type: string; digest: string }[];
+	outlets: { id: number; type: string; digest: string }[];
+	arguments: { name: string; type: string; optional: boolean; digest: string }[];
+	messages: { name: string; digest: string }[];
+	attributes: { name: string; type: string; digest: string }[];
+	seealso: string[];
+}
+
+function section(xml: string, list: string): string {
+	return xml.match(new RegExp(`<${list}\\b[^>]*>([\\s\\S]*?)</${list}>`))?.[1] ?? "";
+}
+
+// <tag …>…</tag> or <tag …/> elements of a list body.
+function items(body: string, tag: string): { open: string; inner: string }[] {
+	const re = new RegExp(`(<${tag}\\b[^>]*?/>)|(<${tag}\\b[^>]*>)([\\s\\S]*?)</${tag}>`, "g");
+	return [...body.matchAll(re)].map((m) => ({ open: m[1] ?? m[2] ?? "", inner: m[3] ?? "" }));
+}
+
+export function summarizeRefpage(xml: string): RefSummary | null {
+	const entry = parseRefpage(xml);
+	if (!entry) return null;
+	// Attributes carry their own nested <attributelist> of self-closing meta
+	// attributes (label, category…) — drop those so lists don't nest.
+	xml = xml.replace(/<attributelist>\s*(?:<attribute\b[^>]*\/>\s*)*<\/attributelist>/g, "");
+	const dg = (inner: string) => firstTag(inner, "digest");
+	return {
+		name: entry.name,
+		category: entry.category,
+		digest: entry.digest,
+		description: entry.description,
+		inlets: items(section(xml, "inletlist"), "inlet").map(({ open, inner }) => ({
+			id: Number(attr(open, "id")),
+			type: attr(open, "type"),
+			digest: dg(inner),
+		})),
+		outlets: items(section(xml, "outletlist"), "outlet").map(({ open, inner }) => ({
+			id: Number(attr(open, "id")),
+			type: attr(open, "type"),
+			digest: dg(inner),
+		})),
+		arguments: items(section(xml, "objarglist"), "objarg").map(({ open, inner }) => ({
+			name: attr(open, "name"),
+			type: attr(open, "type"),
+			optional: attr(open, "optional") === "1",
+			digest: dg(inner),
+		})),
+		messages: items(section(xml, "methodlist"), "method")
+			.map(({ open, inner }) => ({ name: attr(open, "name"), digest: dg(inner) }))
+			.filter((m) => !m.name.startsWith("(")),
+		attributes: items(section(xml, "attributelist"), "attribute").map(({ open, inner }) => ({
+			name: attr(open, "name"),
+			type: attr(open, "type"),
+			digest: dg(inner),
+		})),
+		seealso: entry.seealso,
+	};
+}
+
+/** Full cleaned text of one message / attribute / argument / inlet by name. */
+export function refpageItem(xml: string, item: string): string | null {
+	xml = xml.replace(/<attributelist>\s*(?:<attribute\b[^>]*\/>\s*)*<\/attributelist>/g, "");
+	for (const tag of ["method", "attribute", "objarg"]) {
+		for (const { open, inner } of items(xml, tag)) {
+			if (attr(open, "name") === item) {
+				const args = [...inner.matchAll(/<arg\b[^>]*>/g)]
+					.map((m) => `${attr(m[0], "name")}:${attr(m[0], "type")}${attr(m[0], "optional") === "1" ? "?" : ""}`)
+					.join(" ");
+				return `${tag} ${item}${args ? ` (${args})` : ""}${attr(open, "type") ? ` type=${attr(open, "type")}` : ""}\n${cleanText(inner)}`;
+			}
+		}
+	}
+	return null;
+}

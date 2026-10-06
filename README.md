@@ -120,7 +120,7 @@ claude mcp add max-msp -- bun /path/to/max_assistant/code/mcp-server.js
 
 - **Runtime**: Bun
 - **Agent**: [Claude Code](https://claude.com/claude-code) CLI spawned as a subprocess
-- **MCP tools**: `@modelcontextprotocol/sdk` + `zod`
+- **MCP**: `@modelcontextprotocol/server` v2 + `zod` v4
 - **Max integration**: `max-api` (Node-for-Max), `[v8]`, `[jweb]`
 - **UI**: vanilla TypeScript → browser IIFE, no framework
 
@@ -323,19 +323,36 @@ them without a build step. Edit `src/` and run `bun run build`.
 
 `new chat` resets the Claude session and the bridge's target/id registry.
 
-## MCP tools
+## MCP server
 
-| Tool | Purpose |
-| ---- | ------- |
-| `get_patch_context` | live patch: `patch` title, boxes, lines, warnings |
-| `get_object_connections(id)` | inputs/outputs of one object |
-| `search_objects(query)` | find objects by functionality (name, digest, category, tags) |
-| `search_guide(query)` / `read_guide(path, focus?)` | full-text search + read the Max User Guide (`userguide_search.sqlite`, FTS4) |
-| `get_object_docs(maxclass)` | reference page (`*.maxref.xml`) |
-| `get_object_help(maxclass)` | help patch as boxes/lines |
-| `create_object(text,x,y,box?)` | one box; `box`: `object` (default) / `message` (content may contain `,` `;`) / `comment` |
-| `create_patch_fragment(objects, connections)` | many objects + cords, auto-layout |
-| `connect_objects` / `delete_object` | patchcords / removal |
+`src/mcp-server.ts`, built to `code/mcp-server.js`. MCP TypeScript SDK **v2**
+(`@modelcontextprotocol/server`); `serveStdio` serves both 2025-11-25 clients
+(Claude Desktop / Code today) and stateless 2026-07-28 clients. Usage rules are
+sent as server `instructions`. Errors are tool results with `isError: true`
+and a hint for the model. Set `MAX_BRIDGE_INFO` to point at another bridge
+file (tests).
+
+### Tools
+
+| Tool | Hints | Purpose |
+| ---- | ----- | ------- |
+| `get_patch_context` | read-only | live patch: `patch`, objects (id, maxclass, text, rect [x,y,w,h], inlets, outlets), connections `{from, outlet, to, inlet}` by id, warnings |
+| `get_object_connections(id)` | read-only | inputs/outputs of one object |
+| `search_objects(query)` | read-only | find objects by function (name, digest, category, tags) |
+| `get_object_docs(name, item?)` | read-only | compact reference (inlets, outlets, args, messages, attributes as one-liners, ~10× smaller than the XML); `item` → full text of one message/attribute (e.g. `filtergraph~` `mode` list) |
+| `get_object_help(name)` | read-only | help patch as objects + connections |
+| `search_guide(query)` / `read_guide(path, focus?)` | read-only | Max User Guide (FTS4) |
+| `create_patch_fragment(objects, connections)` | write | many boxes + cords, auto-layout; `box`: object / message / comment |
+| `create_object(text, x, y, box?)` | write | one box |
+| `connect_objects` | write | add a patchcord |
+| `disconnect_objects` | destructive | remove a patchcord |
+| `delete_object` | destructive | remove a box |
+
+### Resources and prompts
+
+- `max://patch/current` — live patch snapshot (attach it in Claude Desktop).
+- `max://object/{name}` — compact reference page; `name` autocompletes.
+- Prompts: `build_patch(description)`, `explain_patch`, `debug_patch`.
 
 ## Documentation (`docs/`)
 
