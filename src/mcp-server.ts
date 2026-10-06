@@ -8,7 +8,8 @@ import { z } from "zod";
 import { callBridge } from "./bridge-client.ts";
 import { layout, originBelow } from "./layout.ts";
 import { buildIndex, type ObjectEntry, searchIndex } from "./object-index.ts";
-import { parseObjectText } from "./parse-object-text.ts";
+import { toBoxSpec } from "./parse-object-text.ts";
+import { readGuide, searchGuide } from "./guide.ts";
 import { checkPatch } from "./patch-checks.ts";
 import {
 	convertMaxpat,
@@ -21,6 +22,9 @@ const BRIDGE_INFO = join(PROJECT_ROOT, ".bridge.json");
 
 const MAX_REFPAGES =
 	"/Applications/Max.app/Contents/Resources/C74/docs/refpages";
+
+const USERGUIDE_DB =
+	"/Applications/Max.app/Contents/Resources/C74/docs/userguide/userguide_search.sqlite";
 
 const MAX_APP_HELP = "/Applications/Max.app/Contents/Resources/C74/help";
 const MAX_USER_ROOTS = [
@@ -61,8 +65,11 @@ function findHelpPatch(maxclass: string): string | null {
 const INSTRUCTIONS = [
 	"Tools for building and inspecting Max/MSP patches in a running Max instance.",
 	"Workflow: get_patch_context first (it tells you which patch window you are editing, field `patch`).",
+	"For HOW to do something in Max (concepts, idioms like line~ envelopes, poly~, pattr, MC, messages with commas) use search_guide + read_guide (the Max User Guide).",
 	"If you don't know an object's name, use search_objects; then confirm inlets/outlets, modes, attributes and arguments with get_object_docs (and get_object_help for a working example). Never guess numeric modes or attribute names.",
 	"Prefer create_patch_fragment to build several objects and their patchcords in one call; omit x/y to get an automatic top-to-bottom layout below existing objects.",
+	"Box types: objects are box 'object' (default); message boxes need box 'message' with the literal content, e.g. {box:'message', text:'1 10, 0 500'}; comments use box 'comment'. Never put message content into an object box (that creates e.g. [pack] instead of a message).",
+	"Message box contents of boxes the user typed by hand are not readable (text is empty in get_patch_context); ask the user if it matters.",
 	"Object ids: use the ids returned by tools (varnames or stable obj-<n> ids). Inlets/outlets are 0-indexed from the left.",
 	"Read the `warnings` in every result (signal feedback loops, invalid objects) and fix them before reporting success. You cannot hear the patch: tell the user how to test it (e.g. turn on ezdac~).",
 	"Max conventions: signal objects end with ~; *~ / +~ need a signal in the left inlet; ezdac~/dac~ inlets are left/right channels.",
@@ -153,6 +160,7 @@ server.tool(
 			name: e.name,
 			category: e.category,
 			digest: e.digest,
+			tags: e.tags.slice(0, 6),
 			seealso: e.seealso.slice(0, 5),
 		}));
 		return {
@@ -163,6 +171,34 @@ server.tool(
 				},
 			],
 		};
+	},
+);
+
+server.tool(
+	"search_guide",
+	"Full-text search in the Max User Guide shipped with Max (≈150 pages: messages, MSP/audio, polyphony, MC, gen, javascript, pattr, presets, subpatchers…). Use for 'how do I…' questions and idioms. Returns page paths with snippets; then read_guide.",
+	{
+		query: z.string().describe("English keywords, e.g. 'line~ envelope', 'poly~ voices'"),
+		limit: z.number().optional(),
+	},
+	async ({ query, limit }) => {
+		const hits = searchGuide(USERGUIDE_DB, query, limit ?? 8);
+		if (hits === null) return text(`User Guide database not found at ${USERGUIDE_DB}`);
+		return text(hits.length ? hits : `Nothing in the User Guide matched "${query}"`);
+	},
+);
+
+server.tool(
+	"read_guide",
+	"Read a Max User Guide page as text (path from search_guide, e.g. '/messages'). Long pages are cut to ~8000 chars; pass `focus` (a word/phrase) to read the part around it.",
+	{
+		path: z.string(),
+		focus: z.string().optional(),
+	},
+	async ({ path, focus }) => {
+		const page = readGuide(USERGUIDE_DB, path, focus);
+		if (!page) return text(`No User Guide page "${path}"`);
+		return text(page);
 	},
 );
 
@@ -199,17 +235,21 @@ server.tool(
 
 server.tool(
 	"create_object",
-	"Create one Max object. `text` is the full box text (e.g. 'cycle~ 440', 'button', 'message foo bar'). Returns its id. For several objects use create_patch_fragment.",
+	"Create one box. `text` is the full object text (e.g. 'cycle~ 440', 'button') or, with box 'message'/'comment', the message/comment content (e.g. '1 10, 0 500'). Returns its id. For several boxes use create_patch_fragment.",
 	{
-		text: z.string().describe("Full box text, e.g. 'cycle~ 440'"),
+		text: z.string().describe("Object text, e.g. 'cycle~ 440' — or message/comment content"),
+		box: z
+					.enum(["object", "message", "comment"])
+					.optional()
+					.describe("object (default), message (message box, text = its content, commas allowed) or comment"),
 		x: z.number().describe("X in pixels (top-left)"),
 		y: z.number().describe("Y in pixels (top-left)"),
 		varname: z.string().optional().describe("Optional unique name, becomes the object's id"),
 	},
-	async ({ text: boxText, x, y, varname }) => {
-		const { classname, args } = parseObjectText(boxText);
-		if (!classname) return text({ ok: false, error: "empty text" });
-		return mutate("create_object", { classname, args, x, y, varname });
+	async ({ text: boxText, box, x, y, varname }) => {
+		const spec = toBoxSpec(boxText, box);
+		if (spec.box === "object" && !spec.classname) return text({ ok: false, error: "empty text" });
+		return mutate("create_object", { ...spec, x, y, varname });
 	},
 );
 
@@ -221,7 +261,11 @@ server.tool(
 			.array(
 				z.object({
 					name: z.string().describe("Local name, e.g. 'osc' — becomes the object's id"),
-					text: z.string().describe("Full box text, e.g. 'cycle~ 440'"),
+					text: z.string().describe("Object text, e.g. 'cycle~ 440' — or message/comment content"),
+					box: z
+						.enum(["object", "message", "comment"])
+						.optional()
+						.describe("object (default), message (message box, text = its content, commas allowed) or comment"),
 					x: z.number().optional(),
 					y: z.number().optional(),
 				}),
@@ -245,7 +289,7 @@ server.tool(
 			name: o.name,
 			x: o.x,
 			y: o.y,
-			...parseObjectText(o.text),
+			...toBoxSpec(o.text, o.box),
 		}));
 		return mutate("create_fragment", { objects: placed, connections });
 	},

@@ -6517,7 +6517,7 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // src/mcp-server.ts
-import { existsSync as existsSync2, readdirSync as readdirSync2, readFileSync as readFileSync3 } from "fs";
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync3 } from "fs";
 import { homedir } from "os";
 import { dirname, join as join2 } from "path";
 import { fileURLToPath } from "url";
@@ -28479,7 +28479,7 @@ function decodeEntities(s) {
   return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
 }
 function cleanText(s) {
-  return decodeEntities(s.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+  return decodeEntities(s.replace(/<[^>]+>/g, " ").replace(/TEXT_HERE/g, "")).replace(/\s+/g, " ").trim();
 }
 function firstTag(xml, tag) {
   const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`));
@@ -28498,12 +28498,14 @@ function parseRefpage(xml) {
     return null;
   const head = xml.split(/<(?:inletlist|outletlist|objarglist|methodlist|attributelist)\b/)[0] ?? xml;
   const seealso = [...xml.matchAll(/<seealso\b[^>]*\bname\s*=\s*"([^"]+)"/g)].map((m) => decodeEntities(m[1] ?? "")).filter(Boolean);
+  const tags = [...xml.matchAll(/<metadata\s+name="tag"\s*>([\s\S]*?)<\/metadata>/g)].map((m) => cleanText(m[1] ?? "")).filter((t) => t && t.toLowerCase() !== attr(root[0], "module").toLowerCase());
   return {
     name,
     module: attr(root[0], "module"),
     category: attr(root[0], "category"),
     digest: firstTag(head, "digest"),
     description: firstTag(head, "description").slice(0, 400),
+    tags: [...new Set(tags)],
     seealso
   };
 }
@@ -28535,11 +28537,13 @@ function searchIndex(index, query, limit = 15) {
   if (terms.length === 0)
     return [];
   const scored = [];
+  const wantsJitter = terms.some((t) => /^(jit|jitter|video|matrix|gl|texture)/.test(t));
   for (const e of index) {
     const name = e.name.toLowerCase();
     const digest = e.digest.toLowerCase();
     const category = e.category.toLowerCase();
     const desc = e.description.toLowerCase();
+    const tags = e.tags.join(" ").toLowerCase();
     let score = 0;
     let matched = 0;
     for (const t of terms) {
@@ -28552,6 +28556,8 @@ function searchIndex(index, query, limit = 15) {
         s += 5;
       if (category.includes(t))
         s += 3;
+      if (tags.includes(t))
+        s += 4;
       if (desc.includes(t))
         s += 1;
       if (s > 0)
@@ -28561,6 +28567,8 @@ function searchIndex(index, query, limit = 15) {
     if (score === 0)
       continue;
     score *= matched / terms.length;
+    if (e.module === "jit" && !wantsJitter)
+      score *= 0.5;
     scored.push({ e, score });
   }
   scored.sort((a, b) => b.score - a.score || a.e.name.localeCompare(b.e.name));
@@ -28578,6 +28586,76 @@ function parseObjectText(text) {
     return Number.isFinite(n) ? n : t;
   });
   return { classname: classname ?? "", args };
+}
+function toBoxSpec(text, box) {
+  const trimmed = text.trim();
+  const m = /^(message|msg|comment)\b\s*/.exec(trimmed);
+  const kind = box ?? (m ? m[1] === "comment" ? "comment" : "message" : "object");
+  if (kind === "object")
+    return { box: "object", ...parseObjectText(trimmed) };
+  const content = !box || m ? trimmed.slice(m?.[0].length ?? 0) : trimmed;
+  return { box: kind, content };
+}
+
+// src/guide.ts
+import { Database } from "bun:sqlite";
+import { existsSync as existsSync2 } from "fs";
+var cached2 = null;
+function open(dbPath) {
+  if (cached2?.path === dbPath)
+    return cached2.db;
+  if (!existsSync2(dbPath))
+    return null;
+  const db = new Database(dbPath, { readonly: true });
+  cached2 = { path: dbPath, db };
+  return db;
+}
+function ftsTerms(query) {
+  return query.toLowerCase().replace(/[^a-z0-9~\s]/g, " ").split(/\s+/).filter((t) => t.length > 1).map((t) => t.replace(/~/g, "")).filter(Boolean);
+}
+function searchGuide(dbPath, query, limit = 8) {
+  const db = open(dbPath);
+  if (!db)
+    return null;
+  const terms = ftsTerms(query);
+  if (terms.length === 0)
+    return [];
+  const sql = `SELECT p.path, p.title, p.description,
+		snippet(pages_fts, '\xAB', '\xBB', '\u2026', 2, 20) AS snippet,
+		length(offsets(pages_fts)) AS weight
+		FROM pages_fts JOIN pages p ON p.id = pages_fts.docid
+		WHERE pages_fts MATCH ? ORDER BY weight DESC LIMIT ?`;
+  let rows = db.query(sql).all(terms.join(" "), limit);
+  if (rows.length < 3 && terms.length > 1) {
+    const seen = new Set(rows.map((r) => r.path));
+    const more = db.query(sql).all(terms.join(" OR "), limit);
+    rows = rows.concat(more.filter((r) => !seen.has(r.path))).slice(0, limit);
+  }
+  return rows.map(({ weight: _w, ...hit }) => hit);
+}
+function readGuide(dbPath, path, focus, maxChars = 8000) {
+  const db = open(dbPath);
+  if (!db)
+    return null;
+  const row = db.query("SELECT title, path, body FROM pages WHERE path = ?").get(path);
+  if (!row)
+    return null;
+  const body = row.body ?? "";
+  if (body.length <= maxChars)
+    return { title: row.title, path: row.path, text: body, truncated: false };
+  let start = 0;
+  if (focus) {
+    const lower = body.toLowerCase();
+    let at = lower.indexOf(focus.toLowerCase());
+    if (at < 0) {
+      for (const t of ftsTerms(focus))
+        if ((at = lower.indexOf(t)) >= 0)
+          break;
+    }
+    if (at > 0)
+      start = Math.max(0, Math.min(at - maxChars / 4, body.length - maxChars));
+  }
+  return { title: row.title, path: row.path, text: body.slice(start, start + maxChars), truncated: true };
 }
 
 // src/patch-checks.ts
@@ -28671,6 +28749,7 @@ function convertMaxpat(raw) {
 var PROJECT_ROOT = join2(dirname(fileURLToPath(import.meta.url)), "..");
 var BRIDGE_INFO = join2(PROJECT_ROOT, ".bridge.json");
 var MAX_REFPAGES = "/Applications/Max.app/Contents/Resources/C74/docs/refpages";
+var USERGUIDE_DB = "/Applications/Max.app/Contents/Resources/C74/docs/userguide/userguide_search.sqlite";
 var MAX_APP_HELP = "/Applications/Max.app/Contents/Resources/C74/help";
 var MAX_USER_ROOTS = [
   join2(homedir(), "Documents/Max 9/Library"),
@@ -28679,29 +28758,29 @@ var MAX_USER_ROOTS = [
 ];
 function findHelpPatch(maxclass) {
   const filename = `${maxclass}.maxhelp`;
-  if (existsSync2(MAX_APP_HELP)) {
+  if (existsSync3(MAX_APP_HELP)) {
     try {
       const flat = join2(MAX_APP_HELP, filename);
-      if (existsSync2(flat))
+      if (existsSync3(flat))
         return flat;
       for (const entry of readdirSync2(MAX_APP_HELP, { withFileTypes: true })) {
         if (!entry.isDirectory())
           continue;
         const p = join2(MAX_APP_HELP, entry.name, filename);
-        if (existsSync2(p))
+        if (existsSync3(p))
           return p;
       }
     } catch {}
   }
   for (const root of MAX_USER_ROOTS) {
-    if (!existsSync2(root))
+    if (!existsSync3(root))
       continue;
     try {
       for (const entry of readdirSync2(root, { withFileTypes: true })) {
         if (!entry.isDirectory())
           continue;
         const p = join2(root, entry.name, "help", filename);
-        if (existsSync2(p))
+        if (existsSync3(p))
           return p;
       }
     } catch {}
@@ -28711,8 +28790,11 @@ function findHelpPatch(maxclass) {
 var INSTRUCTIONS = [
   "Tools for building and inspecting Max/MSP patches in a running Max instance.",
   "Workflow: get_patch_context first (it tells you which patch window you are editing, field `patch`).",
+  "For HOW to do something in Max (concepts, idioms like line~ envelopes, poly~, pattr, MC, messages with commas) use search_guide + read_guide (the Max User Guide).",
   "If you don't know an object's name, use search_objects; then confirm inlets/outlets, modes, attributes and arguments with get_object_docs (and get_object_help for a working example). Never guess numeric modes or attribute names.",
   "Prefer create_patch_fragment to build several objects and their patchcords in one call; omit x/y to get an automatic top-to-bottom layout below existing objects.",
+  "Box types: objects are box 'object' (default); message boxes need box 'message' with the literal content, e.g. {box:'message', text:'1 10, 0 500'}; comments use box 'comment'. Never put message content into an object box (that creates e.g. [pack] instead of a message).",
+  "Message box contents of boxes the user typed by hand are not readable (text is empty in get_patch_context); ask the user if it matters.",
   "Object ids: use the ids returned by tools (varnames or stable obj-<n> ids). Inlets/outlets are 0-indexed from the left.",
   "Read the `warnings` in every result (signal feedback loops, invalid objects) and fix them before reporting success. You cannot hear the patch: tell the user how to test it (e.g. turn on ezdac~).",
   "Max conventions: signal objects end with ~; *~ / +~ need a signal in the left inlet; ezdac~/dac~ inlets are left/right channels."
@@ -28776,6 +28858,7 @@ server.tool("search_objects", "Search ALL Max/MSP/Jitter objects by what they do
     name: e.name,
     category: e.category,
     digest: e.digest,
+    tags: e.tags.slice(0, 6),
     seealso: e.seealso.slice(0, 5)
   }));
   return {
@@ -28787,6 +28870,24 @@ server.tool("search_objects", "Search ALL Max/MSP/Jitter objects by what they do
     ]
   };
 });
+server.tool("search_guide", "Full-text search in the Max User Guide shipped with Max (\u2248150 pages: messages, MSP/audio, polyphony, MC, gen, javascript, pattr, presets, subpatchers\u2026). Use for 'how do I\u2026' questions and idioms. Returns page paths with snippets; then read_guide.", {
+  query: exports_external.string().describe("English keywords, e.g. 'line~ envelope', 'poly~ voices'"),
+  limit: exports_external.number().optional()
+}, async ({ query, limit }) => {
+  const hits = searchGuide(USERGUIDE_DB, query, limit ?? 8);
+  if (hits === null)
+    return text(`User Guide database not found at ${USERGUIDE_DB}`);
+  return text(hits.length ? hits : `Nothing in the User Guide matched "${query}"`);
+});
+server.tool("read_guide", "Read a Max User Guide page as text (path from search_guide, e.g. '/messages'). Long pages are cut to ~8000 chars; pass `focus` (a word/phrase) to read the part around it.", {
+  path: exports_external.string(),
+  focus: exports_external.string().optional()
+}, async ({ path, focus }) => {
+  const page = readGuide(USERGUIDE_DB, path, focus);
+  if (!page)
+    return text(`No User Guide page "${path}"`);
+  return text(page);
+});
 server.tool("get_object_docs", "Get Max MSP reference documentation for an object type: description, inlets, outlets, messages, attributes. Use to understand what an object does and what data it accepts.", {
   maxclass: exports_external.string().describe("Object type, e.g. 'cycle~', 'button', 'route', 'prepend'")
 }, async ({ maxclass }) => {
@@ -28794,7 +28895,7 @@ server.tool("get_object_docs", "Get Max MSP reference documentation for an objec
   let xml = null;
   for (const dir of dirs) {
     const p = join2(MAX_REFPAGES, dir, `${maxclass}.maxref.xml`);
-    if (existsSync2(p)) {
+    if (existsSync3(p)) {
       xml = readFileSync3(p, "utf-8");
       break;
     }
@@ -28810,21 +28911,23 @@ server.tool("get_object_docs", "Get Max MSP reference documentation for an objec
     content: [{ type: "text", text: xml }]
   };
 });
-server.tool("create_object", "Create one Max object. `text` is the full box text (e.g. 'cycle~ 440', 'button', 'message foo bar'). Returns its id. For several objects use create_patch_fragment.", {
-  text: exports_external.string().describe("Full box text, e.g. 'cycle~ 440'"),
+server.tool("create_object", "Create one box. `text` is the full object text (e.g. 'cycle~ 440', 'button') or, with box 'message'/'comment', the message/comment content (e.g. '1 10, 0 500'). Returns its id. For several boxes use create_patch_fragment.", {
+  text: exports_external.string().describe("Object text, e.g. 'cycle~ 440' \u2014 or message/comment content"),
+  box: exports_external.enum(["object", "message", "comment"]).optional().describe("object (default), message (message box, text = its content, commas allowed) or comment"),
   x: exports_external.number().describe("X in pixels (top-left)"),
   y: exports_external.number().describe("Y in pixels (top-left)"),
   varname: exports_external.string().optional().describe("Optional unique name, becomes the object's id")
-}, async ({ text: boxText, x, y, varname }) => {
-  const { classname, args } = parseObjectText(boxText);
-  if (!classname)
+}, async ({ text: boxText, box, x, y, varname }) => {
+  const spec = toBoxSpec(boxText, box);
+  if (spec.box === "object" && !spec.classname)
     return text({ ok: false, error: "empty text" });
-  return mutate("create_object", { classname, args, x, y, varname });
+  return mutate("create_object", { ...spec, x, y, varname });
 });
 server.tool("create_patch_fragment", "Create several objects and patchcords in ONE call. Give each object a short local `name` (used in `connections` and as its id). Connections may also reference existing object ids. Omit x/y for automatic layout (top-to-bottom by signal flow, below existing objects). Returns created ids, errors and patch warnings.", {
   objects: exports_external.array(exports_external.object({
     name: exports_external.string().describe("Local name, e.g. 'osc' \u2014 becomes the object's id"),
-    text: exports_external.string().describe("Full box text, e.g. 'cycle~ 440'"),
+    text: exports_external.string().describe("Object text, e.g. 'cycle~ 440' \u2014 or message/comment content"),
+    box: exports_external.enum(["object", "message", "comment"]).optional().describe("object (default), message (message box, text = its content, commas allowed) or comment"),
     x: exports_external.number().optional(),
     y: exports_external.number().optional()
   })).min(1),
@@ -28841,7 +28944,7 @@ server.tool("create_patch_fragment", "Create several objects and patchcords in O
     name: o.name,
     x: o.x,
     y: o.y,
-    ...parseObjectText(o.text)
+    ...toBoxSpec(o.text, o.box)
   }));
   return mutate("create_fragment", { objects: placed, connections });
 });

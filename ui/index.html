@@ -9,7 +9,11 @@
 <body>
   <header class="bar top">
     <span class="title">assistant</span>
-    <button id="new-chat" type="button">new chat</button>
+    <span id="target" class="target" title="patch the assistant edits">→ —</span>
+    <span class="actions">
+      <button id="pin" type="button" title="lock the assistant to this patch">📌 pin</button>
+      <button id="new-chat" type="button">new chat</button>
+    </span>
   </header>
 
   <main id="log" aria-live="polite"></main>

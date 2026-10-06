@@ -14,6 +14,7 @@ export interface ObjectEntry {
 	category: string;
 	digest: string;
 	description: string;
+	tags: string[];
 	seealso: string[];
 }
 
@@ -27,7 +28,7 @@ function decodeEntities(s: string): string {
 }
 
 function cleanText(s: string): string {
-	return decodeEntities(s.replace(/<[^>]+>/g, " "))
+	return decodeEntities(s.replace(/<[^>]+>/g, " ").replace(/TEXT_HERE/g, ""))
 		.replace(/\s+/g, " ")
 		.trim();
 }
@@ -55,12 +56,18 @@ export function parseRefpage(xml: string): ObjectEntry | null {
 		.map((m) => decodeEntities(m[1] ?? ""))
 		.filter(Boolean);
 
+	const tags = [...xml.matchAll(/<metadata\s+name="tag"\s*>([\s\S]*?)<\/metadata>/g)]
+		.map((m) => cleanText(m[1] ?? ""))
+		// the module name ("MSP", "Max") is on every page — useless as a tag
+		.filter((t) => t && t.toLowerCase() !== attr(root[0], "module").toLowerCase());
+
 	return {
 		name,
 		module: attr(root[0], "module"),
 		category: attr(root[0], "category"),
 		digest: firstTag(head, "digest"),
 		description: firstTag(head, "description").slice(0, 400),
+		tags: [...new Set(tags)],
 		seealso,
 	};
 }
@@ -96,11 +103,13 @@ export function searchIndex(
 	const terms = tokenize(query);
 	if (terms.length === 0) return [];
 	const scored: { e: ObjectEntry; score: number }[] = [];
+	const wantsJitter = terms.some((t) => /^(jit|jitter|video|matrix|gl|texture)/.test(t));
 	for (const e of index) {
 		const name = e.name.toLowerCase();
 		const digest = e.digest.toLowerCase();
 		const category = e.category.toLowerCase();
 		const desc = e.description.toLowerCase();
+		const tags = e.tags.join(" ").toLowerCase();
 		let score = 0;
 		let matched = 0;
 		for (const t of terms) {
@@ -109,6 +118,7 @@ export function searchIndex(
 			else if (name.includes(t)) s += 8;
 			if (digest.includes(t)) s += 5;
 			if (category.includes(t)) s += 3;
+			if (tags.includes(t)) s += 4;
 			if (desc.includes(t)) s += 1;
 			if (s > 0) matched++;
 			score += s;
@@ -116,6 +126,8 @@ export function searchIndex(
 		if (score === 0) continue;
 		// Prefer entries that match more of the query terms.
 		score *= matched / terms.length;
+		// Jitter (video/matrix) objects only when the query is about video.
+		if (e.module === "jit" && !wantsJitter) score *= 0.5;
 		scored.push({ e, score });
 	}
 	scored.sort((a, b) => b.score - a.score || a.e.name.localeCompare(b.e.name));

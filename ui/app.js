@@ -11,7 +11,8 @@
     appendError: "appendError",
     status: "status",
     busy: "busy",
-    clearChat: "clearChat"
+    clearChat: "clearChat",
+    target: "target"
   };
   function decodeText(args) {
     const joined = args.map(String).join(" ");
@@ -35,6 +36,9 @@
   var form = document.getElementById("form");
   var newBtn = document.getElementById("new-chat");
   var statusEl = document.getElementById("status");
+  var targetEl = document.getElementById("target");
+  var pinBtn = document.getElementById("pin");
+  var pinned = false;
   function scrollToBottom() {
     log.scrollTop = log.scrollHeight;
   }
@@ -60,6 +64,21 @@
     if (!on)
       inp.focus();
   }
+  function setTarget(json) {
+    let t;
+    try {
+      t = JSON.parse(json);
+    } catch {
+      return;
+    }
+    pinned = t.pinned;
+    const where = t.name || (t.embedded ? "this patch" : "new window on first edit");
+    targetEl.textContent = `→ ${where}${t.pinned ? " (pinned)" : ""}`;
+    targetEl.classList.toggle("pinned", t.pinned);
+    pinBtn.classList.toggle("on", t.pinned);
+    pinBtn.textContent = t.pinned ? "\uD83D\uDCCC unpin" : "\uD83D\uDCCC pin";
+    pinBtn.hidden = t.embedded;
+  }
   function clearChat() {
     log.innerHTML = "";
   }
@@ -84,6 +103,9 @@
     sendToMax(UI_OUT.prompt, text);
     inp.value = "";
   });
+  pinBtn.addEventListener("click", () => {
+    sendToMax(UI_OUT.prompt, pinned ? "/unpin" : "/pin");
+  });
   newBtn.addEventListener("click", () => {
     sendToMax(UI_OUT.clear);
     clearChat();
@@ -98,6 +120,7 @@
     max.bindInlet(UI_IN.status, (...a) => setStatus(decodeText(a)));
     max.bindInlet(UI_IN.busy, (v) => setBusy(Number(v) === 1));
     max.bindInlet(UI_IN.clearChat, () => clearChat());
+    max.bindInlet(UI_IN.target, (...a) => setTarget(decodeText(a)));
     setStatus("connected");
   } else {
     setStatus("dev mode (no Max host)");

@@ -33,6 +33,8 @@ messages, and the patch is read live (`Patcher.apply` + `Maxobj.patchcords`).
 - Assistant opened on its own (`assistant.maxpat` window): the most recently
   focused **other** patcher window. Click your patch, then the chat. With no
   other window open, the first mutation opens a new "assistant work" patcher.
+  The chat header shows the target (`→ Untitled2`); **📌 pin** (or typing
+  `/pin`, `/unpin`) locks it so focusing other windows doesn't change it.
 - Assistant embedded in your patch (as a `bpatcher`/abstraction): that patch.
   The box hosting the assistant is hidden from the agent and can't be
   deleted or connected by it.
@@ -44,6 +46,12 @@ messages, and the patch is read live (`Patcher.apply` + `Maxobj.patchcords`).
 - **Object search** — `search_objects` finds objects by what they do
   (index over all `*.maxref.xml`).
 - **Reference + help lookup** — `get_object_docs`, `get_object_help`.
+- **User Guide search** — `search_guide` / `read_guide` over the guide that
+  ships with Max (concepts and idioms, not just single objects).
+- **Message & comment boxes** — content with commas (`1 10, 0 500`) is set
+  via `set` with `,`/`;` as separate atoms (verified in Max 9.2). `boxtext`
+  is empty for message boxes, so the bridge remembers the text it wrote;
+  hand-typed message boxes show an empty `text`.
 - **Patch editing** — `create_object`, `create_patch_fragment` (many objects
   + cords in one call, auto-layout), `connect_objects`, `delete_object`.
 - **Self-checks** — every result carries `warnings`: signal feedback loops
@@ -278,9 +286,10 @@ src/
   bridge-client.ts      used by the MCP server to call the bridge (.bridge.json)
   mcp-server.ts         MCP tools + instructions (stdio)
   object-index.ts       search index over *.maxref.xml
+  guide.ts              User Guide search/read (bun:sqlite, FTS4)
   layout.ts             auto-layout for create_patch_fragment
   patch-checks.ts       warnings: signal feedback loops, jbogus objects
-  parse-object-text.ts  "cycle~ 440" → { classname, args }
+  parse-object-text.ts  text → box spec (object / message / comment)
   types/
     max.ts              PatchContext, RawMaxpat + convertMaxpat (help patches)
     protocol.ts         Max ↔ jweb selectors and JSON text codec
@@ -320,10 +329,11 @@ them without a build step. Edit `src/` and run `bun run build`.
 | ---- | ------- |
 | `get_patch_context` | live patch: `patch` title, boxes, lines, warnings |
 | `get_object_connections(id)` | inputs/outputs of one object |
-| `search_objects(query)` | find objects by functionality |
+| `search_objects(query)` | find objects by functionality (name, digest, category, tags) |
+| `search_guide(query)` / `read_guide(path, focus?)` | full-text search + read the Max User Guide (`userguide_search.sqlite`, FTS4) |
 | `get_object_docs(maxclass)` | reference page (`*.maxref.xml`) |
 | `get_object_help(maxclass)` | help patch as boxes/lines |
-| `create_object(text,x,y)` | one object |
+| `create_object(text,x,y,box?)` | one box; `box`: `object` (default) / `message` (content may contain `,` `;`) / `comment` |
 | `create_patch_fragment(objects, connections)` | many objects + cords, auto-layout |
 | `connect_objects` / `delete_object` | patchcords / removal |
 

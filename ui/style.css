@@ -210,3 +210,24 @@ body.busy .status::after {
 		padding: 10px;
 	}
 }
+
+.target {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--fg-dim);
+	font-size: 12px;
+}
+.target.pinned {
+	color: var(--fg-user);
+}
+.actions {
+	display: flex;
+	gap: 8px;
+}
+button.on {
+	background: var(--fg);
+	color: var(--bg);
+}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseObjectText } from "./parse-object-text.ts";
+import { parseObjectText, toBoxSpec } from "./parse-object-text.ts";
 
 describe("parseObjectText", () => {
 	test("classname with single numeric arg", () => {
@@ -64,5 +64,24 @@ describe("parseObjectText", () => {
 			classname: "route",
 			args: ["foo", "bar", "baz"],
 		});
+	});
+});
+
+describe("toBoxSpec", () => {
+	test("plain object text", () => {
+		expect(toBoxSpec("cycle~ 440")).toEqual({ box: "object", classname: "cycle~", args: [440] });
+	});
+	test("explicit message box keeps commas verbatim", () => {
+		expect(toBoxSpec("1 10, 0 500", "message")).toEqual({ box: "message", content: "1 10, 0 500" });
+	});
+	test("'message …' prefix implies a message box", () => {
+		expect(toBoxSpec("message 1 10, 0 500")).toEqual({ box: "message", content: "1 10, 0 500" });
+	});
+	test("comment box", () => {
+		expect(toBoxSpec("comment volume")).toEqual({ box: "comment", content: "volume" });
+		expect(toBoxSpec("press to play", "comment")).toEqual({ box: "comment", content: "press to play" });
+	});
+	test("explicit box + redundant prefix", () => {
+		expect(toBoxSpec("message bang", "message")).toEqual({ box: "message", content: "bang" });
 	});
 });

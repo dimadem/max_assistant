@@ -8,6 +8,9 @@ const page = (name: string, category: string, digest: string, desc = "") => `<?x
 <c74object name="${name}" module="msp" category="${category}">
 	<digest>${digest}</digest>
 	<description>${desc}</description>
+	<metadatalist><metadata name="tag">MSP</metadata><metadata name="tag">
+			oscillator
+		</metadata></metadatalist>
 	<inletlist><inlet id="0"><digest>Inlet digest should not leak</digest><description>nope</description></inlet></inletlist>
 	<seealsolist><seealso name="tapout~"/><seealso name="delay~"/></seealsolist>
 </c74object>`;
@@ -21,6 +24,7 @@ describe("parseRefpage", () => {
 			category: "MSP Delays",
 			digest: "Input to a delay line",
 			description: "Use with tapout~ & more",
+			tags: ["oscillator"],
 			seealso: ["tapout~", "delay~"],
 		});
 	});
@@ -62,4 +66,9 @@ describe("buildIndex", () => {
 		expect(buildIndex(root).map((e) => e.name)).toEqual(["cycle~"]);
 		expect(buildIndex(join(root, "missing"))).toEqual([]);
 	});
+});
+
+test("tags make objects findable by role", () => {
+	const idx = [parseRefpage(page("rect~", "MSP Synthesis", "Antialiased rectangular wave"))!];
+	expect(searchIndex(idx, "oscillator")[0]?.name).toBe("rect~");
 });

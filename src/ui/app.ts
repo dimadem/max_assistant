@@ -41,6 +41,9 @@ const inp = document.getElementById("inp") as HTMLInputElement;
 const form = document.getElementById("form") as HTMLFormElement;
 const newBtn = document.getElementById("new-chat") as HTMLButtonElement;
 const statusEl = document.getElementById("status") as HTMLElement;
+const targetEl = document.getElementById("target") as HTMLElement;
+const pinBtn = document.getElementById("pin") as HTMLButtonElement;
+let pinned = false;
 
 function scrollToBottom(): void {
 	log.scrollTop = log.scrollHeight;
@@ -68,6 +71,28 @@ function setBusy(on: boolean): void {
 	document.body.classList.toggle("busy", on);
 	inp.disabled = on;
 	if (!on) inp.focus();
+}
+
+interface TargetInfo {
+	name: string;
+	pinned: boolean;
+	embedded: boolean;
+}
+
+function setTarget(json: string): void {
+	let t: TargetInfo;
+	try {
+		t = JSON.parse(json) as TargetInfo;
+	} catch {
+		return;
+	}
+	pinned = t.pinned;
+	const where = t.name || (t.embedded ? "this patch" : "new window on first edit");
+	targetEl.textContent = `→ ${where}${t.pinned ? " (pinned)" : ""}`;
+	targetEl.classList.toggle("pinned", t.pinned);
+	pinBtn.classList.toggle("on", t.pinned);
+	pinBtn.textContent = t.pinned ? "📌 unpin" : "📌 pin";
+	pinBtn.hidden = t.embedded; // embedded assistant always edits its host patch
 }
 
 function clearChat(): void {
@@ -101,6 +126,10 @@ form.addEventListener("submit", (e: Event) => {
 	inp.value = "";
 });
 
+pinBtn.addEventListener("click", () => {
+	sendToMax(UI_OUT.prompt, pinned ? "/unpin" : "/pin");
+});
+
 newBtn.addEventListener("click", () => {
 	sendToMax(UI_OUT.clear);
 	clearChat();
@@ -126,6 +155,7 @@ if (max?.bindInlet) {
 	max.bindInlet(UI_IN.status, (...a) => setStatus(decodeText(a)));
 	max.bindInlet(UI_IN.busy, (v) => setBusy(Number(v) === 1));
 	max.bindInlet(UI_IN.clearChat, () => clearChat());
+	max.bindInlet(UI_IN.target, (...a) => setTarget(decodeText(a)));
 	setStatus("connected");
 } else {
 	setStatus("dev mode (no Max host)");

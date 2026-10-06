@@ -20,6 +20,8 @@ export const UI_IN = {
 	status: "status",
 	busy: "busy",
 	clearChat: "clearChat",
+	/** `{"text": "{\"name\":…,\"pinned\":…,\"embedded\":…}"}` — patch the agent edits */
+	target: "target",
 } as const;
 export type UIInSelector = (typeof UI_IN)[keyof typeof UI_IN];
 

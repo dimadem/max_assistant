@@ -97,7 +97,8 @@ var UI_IN = {
   appendError: "appendError",
   status: "status",
   busy: "busy",
-  clearChat: "clearChat"
+  clearChat: "clearChat",
+  target: "target"
 };
 var encodeText = (text) => JSON.stringify({ text });
 
@@ -249,6 +250,10 @@ Max.addHandlers({
     const text = joinArgs(args).trim();
     if (!text)
       return;
+    if (text === "/pin" || text === "/unpin") {
+      Max.outlet("bridge", text.slice(1));
+      return;
+    }
     if (running) {
       setStatus("busy — wait for the current answer");
       return;
@@ -265,7 +270,8 @@ Max.addHandlers({
     setStatus("ready");
     Max.post("Session cleared");
   },
-  bridgeResult: (...args) => bridge.handleResult(joinArgs(args))
+  bridgeResult: (...args) => bridge.handleResult(joinArgs(args)),
+  target: (...args) => sendText(UI_IN.target, joinArgs(args))
 });
 try {
   const info = await bridge.listen();
@@ -281,4 +287,5 @@ process.on("exit", () => {
 });
 Max.outlet("url", UI_URL);
 setStatus("ready");
+Max.outlet("bridge", "report");
 Max.post(`Assistant ready. UI: ${UI_URL}`);

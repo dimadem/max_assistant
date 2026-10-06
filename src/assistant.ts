@@ -205,6 +205,11 @@ Max.addHandlers({
 	prompt: (...args: unknown[]) => {
 		const text = joinArgs(args).trim();
 		if (!text) return;
+		// Chat commands handled locally (the 📌 button sends these too).
+		if (text === "/pin" || text === "/unpin") {
+			Max.outlet("bridge", text.slice(1));
+			return;
+		}
 		if (running) {
 			setStatus("busy — wait for the current answer");
 			return;
@@ -222,6 +227,8 @@ Max.addHandlers({
 		Max.post("Session cleared");
 	},
 	bridgeResult: (...args: unknown[]) => bridge.handleResult(joinArgs(args)),
+	// [v8] reports which patch the agent will edit; forward to the chat header.
+	target: (...args: unknown[]) => sendText(UI_IN.target, joinArgs(args)),
 });
 
 try {
@@ -243,4 +250,5 @@ process.on("exit", () => {
 Max.outlet("url", UI_URL);
 
 setStatus("ready");
+Max.outlet("bridge", "report"); // [v8] reports before we're up; ask again
 Max.post(`Assistant ready. UI: ${UI_URL}`);

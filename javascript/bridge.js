@@ -7,11 +7,13 @@
  *
  * Command JSON: { requestId, type, ...params }
  *   get_context      { create? }                → { ok, context }
- *   create_object    { classname, args, x, y, varname? }
+ *   create_object    { box?, classname, args | content, x, y, varname? }
  *   connect_objects  { srcId, srcOutlet, dstId, dstInlet }
  *   delete_object    { id }
  *   create_fragment  { objects:[{name,classname,args,x,y}], connections:[{from,outlet,to,inlet}] }
+ *   pin / unpin      lock the target patch (also `pin`/`unpin` messages)
  * Every mutation result carries a fresh `context` snapshot.
+ * Outlet `target <json>` reports the current target { name, pinned } on change.
  */
 
 autowatch = 1;
@@ -19,7 +21,7 @@ inlets = 1;
 outlets = 1;
 const jsthis = this; // the [v8] object; `this` is not reliable inside callbacks
 
-const VERSION = "v13";
+const VERSION = "v16";
 post(`bridge.js ${VERSION} loaded\n`);
 
 // ---------- helpers ---------------------------------------------------------
@@ -74,6 +76,7 @@ function isBogus(obj) {
 
 let createdTarget = null;
 let lastFocused = null; // last patcher window the user was in (not the assistant)
+let pinned = null; // patch locked by the user via 📌 — wins over focus
 
 // max.frontpatcher is null while commands arrive (e.g. while Claude Desktop
 // or the chat's jweb has focus), so remember the user's patch as they work.
@@ -82,8 +85,41 @@ const focusTracker = new Task(() => {
 	try {
 		const fp = max.frontpatcher;
 		if (fp && !samePatcher(topLevel(fp), ownTop())) lastFocused = topLevel(fp);
+		reportTarget();
 	} catch (_) {}
 });
+
+let reported = "";
+function cleanTitle(title) {
+	return String(title).replace(/\s*\((unlocked|presentation|locked)\)\s*$/i, "");
+}
+// node.script asks for this once it's ready (earlier reports are dropped).
+function report() {
+	reportTarget(true);
+}
+function reportTarget(force) {
+	const t = pickTarget(false);
+	let name = "";
+	try {
+		name = t ? cleanTitle(t.wind.title || t.name || "") : "";
+	} catch (_) {}
+	const state = JSON.stringify({ name, pinned: isAlive(pinned), embedded: !isStandalone() });
+	if (force || state !== reported) {
+		reported = state;
+		outlet(0, "target", state);
+	}
+}
+
+function pin() {
+	const t = pickTarget(false);
+	if (t && isStandalone()) pinned = t;
+	reportTarget(true);
+}
+
+function unpin() {
+	pinned = null;
+	reportTarget(true);
+}
 focusTracker.interval = 150;
 focusTracker.repeat();
 
@@ -108,6 +144,7 @@ function isStandalone() {
 function pickTarget(allowCreate) {
 	const own = ownTop();
 	if (!isStandalone()) return own;
+	if (isAlive(pinned)) return pinned;
 
 	let w = max.frontpatcher ? max.frontpatcher.wind : null;
 	let guard = 0;
@@ -118,10 +155,7 @@ function pickTarget(allowCreate) {
 	}
 	if (isAlive(lastFocused)) return lastFocused;
 	if (isAlive(createdTarget)) return createdTarget;
-	if (!allowCreate) {
-		post(`bridge: no target window. ${JSON.stringify(describeWindows())}\n`);
-		return null;
-	}
+	if (!allowCreate) return null;
 	createdTarget = new Patcher(80, 80, 780, 620);
 	createdTarget.wind.visible = 1;
 	createdTarget.wind.title = "assistant work";
@@ -136,6 +170,7 @@ function describeWindows() {
 		own: own.name,
 		standalone: isStandalone(),
 		lastFocused: isAlive(lastFocused) ? lastFocused.name : null,
+		pinned: isAlive(pinned) ? pinned.name : null,
 		front: null,
 		windows: [],
 	};
@@ -216,7 +251,7 @@ function snapshot(target) {
 	const boxes = objs.map((obj) => ({
 		id: idFor(obj),
 		maxclass: obj.maxclass,
-		text: boxText(obj),
+		text: boxText(obj) || knownText[obj.varname] || "",
 		rect: obj.rect,
 		numinlets: obj.numinlets,
 		numoutlets: obj.numoutlets,
@@ -230,7 +265,7 @@ function snapshot(target) {
 	});
 	let name = "";
 	try {
-		name = target.wind.title || target.name || "";
+		name = cleanTitle(target.wind.title || target.name || "");
 	} catch (_) {
 		name = target.name || "";
 	}
@@ -266,7 +301,47 @@ function uniqueName(target, base) {
 
 // ---------- operations ------------------------------------------------------
 
+// ---------- message / comment boxes ----------------------------------------
+//
+// Verified in Max 9.2 (/probe): `set` with "," / ";" as separate atoms gives
+// a real comma (`1 10, 0 500`). setboxattr/setattr("text") do nothing, and
+// `boxtext` reads back EMPTY for message boxes — so we remember what we wrote.
+
+const knownText = {}; // varname → content of message boxes we created
+
+function atomsOf(content) {
+	return String(content)
+		.replace(/([,;])/g, " $1 ")
+		.trim()
+		.split(/\s+/)
+		.filter((t) => t !== "")
+		.map((t) => (/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t) ? Number(t) : t));
+}
+
+function createBox(target, spec) {
+	let obj;
+	try {
+		obj = target.newdefault(spec.x, spec.y, spec.box);
+	} catch (e) {
+		return { ok: false, error: `newdefault ${spec.box} failed: ${e}` };
+	}
+	if (isBogus(obj)) return { ok: false, error: `could not create a ${spec.box} box` };
+	const content = String(spec.content || "");
+	if (content.trim()) {
+		try {
+			obj.message.apply(obj, ["set"].concat(atomsOf(content)));
+		} catch (e) {
+			return { ok: false, error: `setting ${spec.box} text failed: ${e}` };
+		}
+	}
+	const name = spec.varname || uniqueName(target, spec.name || spec.box);
+	obj.varname = name;
+	knownText[name] = content;
+	return { ok: true, id: name, obj, maxclass: obj.maxclass, numinlets: obj.numinlets, numoutlets: obj.numoutlets };
+}
+
 function createOne(target, spec) {
+	if (spec.box === "message" || spec.box === "comment") return createBox(target, spec);
 	if (!spec.classname) return { ok: false, error: "empty text" };
 	if (spec.varname && nameInUse(target, spec.varname)) {
 		return { ok: false, error: `varname collision: ${spec.varname}` };
@@ -320,6 +395,7 @@ const handlers = {
 	get_context(cmd) {
 		const target = pickTarget(!!cmd.create);
 		if (!target) {
+			post(`bridge: no target window. ${JSON.stringify(describeWindows())}\n`);
 			return {
 				ok: true,
 				context: { patch: "", boxes: [], lines: [] },
@@ -361,8 +437,9 @@ const handlers = {
 			if (r.ok) {
 				created[spec.name] = r;
 				objects.push({ name: spec.name, id: r.id, numinlets: r.numinlets, numoutlets: r.numoutlets });
+				if (r.warning) errors.push(`object "${spec.name}": ${r.warning}`);
 			} else {
-				errors.push(`object "${spec.name}" (${spec.classname}): ${r.error}`);
+				errors.push(`object "${spec.name}" (${spec.classname || spec.box}): ${r.error}`);
 			}
 		}
 		const resolve = (ref) => created[ref]?.obj || resolveById(target, ref);
@@ -432,3 +509,6 @@ function notifydeleted() {
 // Top-level functions don't always reach Max's dispatch table in v8.
 globalThis.command = command;
 globalThis.reset = reset;
+globalThis.pin = pin;
+globalThis.report = report;
+globalThis.unpin = unpin;
