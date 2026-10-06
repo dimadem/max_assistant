@@ -4,32 +4,25 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { BridgeInfo } from "./bridge-server.ts";
-
-export type BridgeResult = Record<string, unknown> & { ok: boolean; error?: string };
+import type { BridgeCommand, BridgeCommands, BridgeInfo, BridgeReply } from "./types/bridge.ts";
 
 const NOT_RUNNING =
 	"Max assistant is not running. Open max_assistant.maxproj in Max (the [node.script] starts the bridge).";
 
-export async function callBridge(
+export async function callBridge<K extends BridgeCommand>(
 	infoPath: string,
-	type: string,
-	params: Record<string, unknown> = {},
-): Promise<BridgeResult> {
-	let info: BridgeInfo;
+	type: K,
+	...[params]: BridgeCommands[K]["params"] extends Record<string, never> ? [] : [BridgeCommands[K]["params"]]
+): Promise<BridgeReply<K>> {
 	try {
-		info = JSON.parse(readFileSync(infoPath, "utf-8"));
-	} catch {
-		return { ok: false, error: NOT_RUNNING };
-	}
-	try {
+		const info: BridgeInfo = JSON.parse(readFileSync(infoPath, "utf-8"));
 		const res = await fetch(`http://127.0.0.1:${info.port}/command`, {
 			method: "POST",
 			headers: { "content-type": "application/json", "x-bridge-token": info.token },
 			body: JSON.stringify({ type, ...params }),
 		});
-		return (await res.json()) as BridgeResult;
+		return (await res.json()) as BridgeReply<K>;
 	} catch {
-		return { ok: false, error: NOT_RUNNING };
+		return { ok: false, error: NOT_RUNNING } as BridgeReply<K>;
 	}
 }

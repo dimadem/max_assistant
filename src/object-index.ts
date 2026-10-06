@@ -159,12 +159,16 @@ function items(body: string, tag: string): { open: string; inner: string }[] {
 	return [...body.matchAll(re)].map((m) => ({ open: m[1] ?? m[2] ?? "", inner: m[3] ?? "" }));
 }
 
+// Attributes carry their own nested <attributelist> of self-closing meta
+// attributes (label, category…) — drop those so lists don't nest.
+function dropMetaAttributes(xml: string): string {
+	return xml.replace(/<attributelist>\s*(?:<attribute\b[^>]*\/>\s*)*<\/attributelist>/g, "");
+}
+
 export function summarizeRefpage(xml: string): RefSummary | null {
 	const entry = parseRefpage(xml);
 	if (!entry) return null;
-	// Attributes carry their own nested <attributelist> of self-closing meta
-	// attributes (label, category…) — drop those so lists don't nest.
-	xml = xml.replace(/<attributelist>\s*(?:<attribute\b[^>]*\/>\s*)*<\/attributelist>/g, "");
+	xml = dropMetaAttributes(xml);
 	const dg = (inner: string) => firstTag(inner, "digest");
 	return {
 		name: entry.name,
@@ -201,7 +205,7 @@ export function summarizeRefpage(xml: string): RefSummary | null {
 
 /** Full cleaned text of one message / attribute / argument / inlet by name. */
 export function refpageItem(xml: string, item: string): string | null {
-	xml = xml.replace(/<attributelist>\s*(?:<attribute\b[^>]*\/>\s*)*<\/attributelist>/g, "");
+	xml = dropMetaAttributes(xml);
 	for (const tag of ["method", "attribute", "objarg"]) {
 		for (const { open, inner } of items(xml, tag)) {
 			if (attr(open, "name") === item) {

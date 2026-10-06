@@ -32,9 +32,9 @@ describe("layout", () => {
 	});
 
 	test("origin goes below existing objects", () => {
-		const ctx: PatchContext = { boxes: [{ ...box("a", "x"), rect: [100, 50, 60, 22] }], lines: [] };
+		const ctx: PatchContext = { boxes: [{ ...box("a", "x"), rect: [100, 50, 60, 22] }], connections: [] };
 		expect(originBelow(ctx)).toEqual({ x: 100, y: 112 });
-		expect(originBelow({ boxes: [], lines: [] })).toEqual({ x: 40, y: 40 });
+		expect(originBelow({ boxes: [], connections: [] })).toEqual({ x: 40, y: 40 });
 	});
 });
 
@@ -42,7 +42,7 @@ describe("checkPatch", () => {
 	test("flags a direct signal feedback loop", () => {
 		const ctx: PatchContext = {
 			boxes: [box("osc", "cycle~ 440"), box("gain", "*~ 0.2")],
-			lines: [{ src: [0, 0], dst: [1, 0] }, { src: [1, 0], dst: [0, 0] }],
+			connections: [{ from: "osc", outlet: 0, to: "gain", inlet: 0 }, { from: "gain", outlet: 0, to: "osc", inlet: 0 }],
 		};
 		const w = checkPatch(ctx);
 		expect(w).toHaveLength(1);
@@ -53,7 +53,7 @@ describe("checkPatch", () => {
 	test("allows feedback through tapin~/tapout~", () => {
 		const ctx: PatchContext = {
 			boxes: [box("in", "tapin~ 1000"), box("out", "tapout~ 250"), box("fb", "*~ 0.5")],
-			lines: [{ src: [0, 0], dst: [1, 0] }, { src: [1, 0], dst: [2, 0] }, { src: [2, 0], dst: [0, 0] }],
+			connections: [{ from: "in", outlet: 0, to: "out", inlet: 0 }, { from: "out", outlet: 0, to: "fb", inlet: 0 }, { from: "fb", outlet: 0, to: "in", inlet: 0 }],
 		};
 		expect(checkPatch(ctx)).toEqual([]);
 	});
@@ -61,7 +61,7 @@ describe("checkPatch", () => {
 	test("ignores control-rate loops and flags bogus objects", () => {
 		const ctx: PatchContext = {
 			boxes: [box("a", "t b"), box("b", "+ 1"), box("x", "sine~ 440", "jbogus")],
-			lines: [{ src: [0, 0], dst: [1, 0] }, { src: [1, 0], dst: [0, 0] }],
+			connections: [{ from: "a", outlet: 0, to: "b", inlet: 0 }, { from: "b", outlet: 0, to: "a", inlet: 0 }],
 		};
 		const w = checkPatch(ctx);
 		expect(w).toHaveLength(1);

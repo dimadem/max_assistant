@@ -46,9 +46,9 @@ function createBridgeServer(sendToMax, timeoutMs = 1e4) {
     });
   }
   const server = createServer((req, res) => {
-    const send = (status, body2) => {
+    const send = (status, body) => {
       res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(body2));
+      res.end(JSON.stringify(body));
     };
     if (req.method !== "POST" || req.url !== "/command")
       return send(404, { ok: false, error: "not found" });
@@ -89,6 +89,35 @@ function createBridgeServer(sendToMax, timeoutMs = 1e4) {
   return { handleResult, dispatch, listen, close: () => server.close() };
 }
 
+// src/claude-stream.ts
+function lineParser(onEvent, onBadLine) {
+  let buffer = "";
+  return (chunk) => {
+    buffer += chunk;
+    const lines = buffer.split(`
+`);
+    buffer = lines.pop() ?? "";
+    for (const line of lines.map((l) => l.trim()).filter(Boolean)) {
+      try {
+        onEvent(JSON.parse(line));
+      } catch (e) {
+        onBadLine(line, e);
+      }
+    }
+  };
+}
+function shortToolName(name) {
+  return name.split("__").pop() || name;
+}
+function statusFor(ev) {
+  if (ev.type !== "assistant")
+    return null;
+  const tool = ev.message.content.find((c) => c.type === "tool_use");
+  if (tool)
+    return `claude · ${shortToolName(tool.name)}`;
+  return ev.message.content.some((c) => c.type === "text") ? "claude · writing…" : null;
+}
+
 // src/types/protocol.ts
 var UI_IN = {
   appendUser: "appendUser",
@@ -109,6 +138,7 @@ var BRIDGE_INFO = join(PROJECT_ROOT, ".bridge.json");
 var MCP_CONFIG = join(PROJECT_ROOT, ".mcp.json");
 var UI_URL = `file://${join(PROJECT_ROOT, "ui", "index.html")}`;
 var running = false;
+var TIMEOUT_MS = 120000;
 var currentSessionId = null;
 var SYSTEM_PROMPT = [
   "You are a Max/MSP assistant embedded in a chat panel inside Max.",
@@ -124,10 +154,6 @@ var extraPaths = [
   "/bin"
 ];
 var ENRICHED_PATH = [...extraPaths, process.env.PATH ?? ""].join(":");
-function shortToolName(name) {
-  const parts = name.split("__");
-  return parts[parts.length - 1] ?? name;
-}
 function sendText(selector, text) {
   Max.outlet(selector, encodeText(text));
 }
@@ -137,7 +163,16 @@ function setBusy(on) {
 function setStatus(text) {
   sendText(UI_IN.status, text);
 }
-function spawnClaude(prompt) {
+function finish(error) {
+  running = false;
+  setBusy(false);
+  if (error) {
+    Max.post(error);
+    sendText(UI_IN.appendError, error);
+  }
+  setStatus("ready");
+}
+function claudeArgs(prompt) {
   const args = [
     "--print",
     prompt,
@@ -153,92 +188,62 @@ function spawnClaude(prompt) {
     SYSTEM_PROMPT
   ];
   if (currentSessionId) {
-    args.push("--resume", currentSessionId);
     Max.post(`Running claude (resume ${currentSessionId.slice(0, 8)}…)`);
-  } else {
-    currentSessionId = randomUUID2();
-    args.push("--session-id", currentSessionId);
-    Max.post(`Running claude (new session ${currentSessionId.slice(0, 8)}…)`);
+    return [...args, "--resume", currentSessionId];
   }
-  const child = spawn("claude", args, {
+  currentSessionId = randomUUID2();
+  Max.post(`Running claude (new session ${currentSessionId.slice(0, 8)}…)`);
+  return [...args, "--session-id", currentSessionId];
+}
+var resultError;
+function handleEvent(ev) {
+  const status = statusFor(ev);
+  if (status)
+    setStatus(status);
+  if (ev.type !== "result")
+    return;
+  if (ev.is_error) {
+    resultError = `Claude error: ${ev.result ?? "(no message)"}`;
+    return;
+  }
+  currentSessionId = ev.session_id;
+  const text = ev.result?.trim() ?? "";
+  if (text)
+    sendText(UI_IN.appendAssistant, text);
+}
+function spawnClaude(prompt) {
+  resultError = undefined;
+  let timedOut = false;
+  const child = spawn("claude", claudeArgs(prompt), {
     cwd: PROJECT_ROOT,
     env: { ...process.env, PATH: ENRICHED_PATH }
   });
   child.stdin.end();
-  let stdoutBuffer = "";
-  const handleEvent = (ev) => {
-    switch (ev.type) {
-      case "assistant": {
-        const toolUse = ev.message.content.find((c) => c.type === "tool_use");
-        if (toolUse) {
-          setStatus(`claude · ${shortToolName(toolUse.name)}`);
-          return;
-        }
-        if (ev.message.content.some((c) => c.type === "text")) {
-          setStatus("claude · writing…");
-        }
-        return;
-      }
-      case "result": {
-        if (ev.is_error) {
-          const msg = `Claude error: ${ev.result ?? "(no message)"}`;
-          Max.post(msg);
-          sendText(UI_IN.appendError, msg);
-          setStatus("ready");
-          return;
-        }
-        currentSessionId = ev.session_id;
-        const text = ev.result?.trim() ?? "";
-        if (text)
-          sendText(UI_IN.appendAssistant, text);
-        setStatus("ready");
-        return;
-      }
-    }
-  };
-  child.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk.toString();
-    const lines = stdoutBuffer.split(`
-`);
-    stdoutBuffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed)
-        continue;
-      try {
-        handleEvent(JSON.parse(trimmed));
-      } catch (e) {
-        Max.post(`stream parse error: ${e}; line=${trimmed.slice(0, 200)}`);
-      }
-    }
-  });
+  const feed = lineParser(handleEvent, (line, e) => Max.post(`stream parse error: ${e}; line=${line.slice(0, 200)}`));
+  child.stdout.on("data", (chunk) => feed(chunk.toString()));
   child.stderr.on("data", (chunk) => {
     const line = chunk.toString().trim();
     if (line)
       Max.post(`[claude] ${line}`);
   });
-  const timeout = setTimeout(() => {
+  const timer = setTimeout(() => {
+    timedOut = true;
     child.kill("SIGTERM");
-    Max.post("Claude timeout (120s)");
-  }, 120000);
+  }, TIMEOUT_MS);
   child.on("close", (code) => {
-    clearTimeout(timeout);
-    setBusy(false);
-    running = false;
-    if (code !== 0) {
-      const msg = `Claude exited with code ${code}`;
-      Max.post(msg);
-      sendText(UI_IN.appendError, msg);
-      setStatus("ready");
-    }
+    clearTimeout(timer);
+    if (timedOut)
+      finish(`Claude timed out after ${TIMEOUT_MS / 1000}s`);
+    else if (resultError)
+      finish(resultError);
+    else if (code !== 0)
+      finish(`Claude exited with code ${code}`);
+    else
+      finish();
   });
   child.on("error", (err) => {
-    setBusy(false);
-    running = false;
-    const msg = `Failed to start claude: ${err.message}`;
-    Max.post(msg);
-    sendText(UI_IN.appendError, msg);
-    setStatus("ready");
+    clearTimeout(timer);
+    finish(`Failed to start claude: ${err.message}`);
   });
 }
 function joinArgs(args) {

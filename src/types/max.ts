@@ -1,17 +1,15 @@
 /**
  * Max MSP patch types.
- * Covers the .maxpat JSON format and the context passed to MCP tools.
+ * Covers the .maxpat JSON format and the patch snapshot used by MCP tools.
+ * Connections reference boxes by id — the same shape the model sees.
  */
 
 /** [x, y, width, height] in pixels */
 type Rect = [number, number, number, number];
 
-/** [objectIndex, portNumber] */
-type Port = [number, number];
-
 /** A single object (box) in the patch */
-interface Box {
-	/** varname if set, otherwise the internal id (e.g. "obj-2") */
+export interface Box {
+	/** varname if set, otherwise a stable id (e.g. "obj-2") */
 	id: string;
 	/** Object type, e.g. "newobj", "message", "button", "cycle~" */
 	maxclass: string;
@@ -25,18 +23,19 @@ interface Box {
 	selected?: boolean;
 }
 
-/** A patchcord between two boxes */
-interface Connection {
-	src: Port;
-	dst: Port;
+/** A patchcord `from:outlet → to:inlet` (box ids) */
+export interface Connection {
+	from: string;
+	outlet: number;
+	to: string;
+	inlet: number;
 }
 
-/** Patch context written to disk and read by MCP tools */
 export interface PatchContext {
 	/** Window title of the patch the assistant is editing (live snapshots only) */
 	patch?: string;
 	boxes: Box[];
-	lines: Connection[];
+	connections: Connection[];
 }
 
 // ---------------------------------------------------------------------------
@@ -58,44 +57,29 @@ interface RawPatchline {
 	destination: [string, number];
 }
 
-interface RawPatcher {
-	boxes: { box: RawBox }[];
-	lines: { patchline: RawPatchline }[];
-}
-
 export interface RawMaxpat {
-	patcher: RawPatcher;
+	patcher: {
+		boxes: { box: RawBox }[];
+		lines: { patchline: RawPatchline }[];
+	};
 }
 
-/** Convert a parsed .maxpat JSON into PatchContext */
+/** Convert a parsed .maxpat JSON into PatchContext (varname wins as id). */
 export function convertMaxpat(raw: RawMaxpat): PatchContext {
-	const idToIndex = new Map<string, number>();
-
-	const boxes: Box[] = raw.patcher.boxes.map((entry, i) => {
-		const b = entry.box;
-		idToIndex.set(b.id, i);
-		return {
-			id: b.varname ?? b.id,
+	const idOf = new Map(raw.patcher.boxes.map(({ box: b }) => [b.id, b.varname ?? b.id]));
+	return {
+		boxes: raw.patcher.boxes.map(({ box: b }) => ({
+			id: idOf.get(b.id) ?? b.id,
 			maxclass: b.maxclass,
 			text: b.text ?? "",
 			rect: b.patching_rect,
 			numinlets: b.numinlets,
 			numoutlets: b.numoutlets,
-		};
-	});
-
-	const lines: Connection[] = [];
-	for (const entry of raw.patcher.lines) {
-		const pl = entry.patchline;
-		const srcIdx = idToIndex.get(pl.source[0]);
-		const dstIdx = idToIndex.get(pl.destination[0]);
-		if (srcIdx !== undefined && dstIdx !== undefined) {
-			lines.push({
-				src: [srcIdx, pl.source[1]],
-				dst: [dstIdx, pl.destination[1]],
-			});
-		}
-	}
-
-	return { boxes, lines };
+		})),
+		connections: raw.patcher.lines.flatMap(({ patchline: { source, destination } }) => {
+			const from = idOf.get(source[0]);
+			const to = idOf.get(destination[0]);
+			return from && to ? [{ from, outlet: source[1], to, inlet: destination[1] }] : [];
+		}),
+	};
 }

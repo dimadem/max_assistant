@@ -282,16 +282,19 @@ classes are not available inside `jweb`.
 ```
 src/
   assistant.ts          [node.script] entry: chat, spawns claude, runs the bridge
+  claude-stream.ts      stream-json parsing + status lines for the chat
   bridge-server.ts      local HTTP endpoint → `command` to [v8], awaits `bridgeResult`
   bridge-client.ts      used by the MCP server to call the bridge (.bridge.json)
   mcp-server.ts         MCP tools + instructions (stdio)
+  max-docs.ts           Max.app doc paths: refpages, help patches, User Guide db
   object-index.ts       search index over *.maxref.xml
   guide.ts              User Guide search/read (bun:sqlite, FTS4)
   layout.ts             auto-layout for create_patch_fragment
   patch-checks.ts       warnings: signal feedback loops, jbogus objects
-  parse-object-text.ts  text → box spec (object / message / comment)
+  box-spec.ts           text → box spec with tokenised atoms (object / message / comment)
   types/
-    max.ts              PatchContext, RawMaxpat + convertMaxpat (help patches)
+    bridge.ts           MCP ↔ [v8 bridge.js] command contract (params + results)
+    max.ts              PatchContext (connections by id), RawMaxpat + convertMaxpat
     protocol.ts         Max ↔ jweb selectors and JSON text codec
   ui/app.ts             jweb entry
 scripts/ui-server.ts    Bun static server for UI (port 5173)

@@ -8,81 +8,25 @@
  * explain_patch, debug_patch.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type CallToolResult, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { callBridge } from "./bridge-client.ts";
+import { toBoxSpec } from "./box-spec.ts";
 import { readGuide, searchGuide } from "./guide.ts";
 import { layout, originBelow } from "./layout.ts";
-import {
-	buildIndex,
-	type ObjectEntry,
-	refpageItem,
-	searchIndex,
-	summarizeRefpage,
-} from "./object-index.ts";
-import { toBoxSpec } from "./parse-object-text.ts";
+import { findHelpPatch, findRefpage, getIndex, MAX_REFPAGES, USERGUIDE_DB } from "./max-docs.ts";
+import { refpageItem, searchIndex, summarizeRefpage } from "./object-index.ts";
 import { checkPatch } from "./patch-checks.ts";
+import type { BridgeCommand, BridgeCommands } from "./types/bridge.ts";
 import { convertMaxpat, type PatchContext, type RawMaxpat } from "./types/max.ts";
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // Overridable for tests so they never touch the live bridge file.
 const BRIDGE_INFO = process.env.MAX_BRIDGE_INFO ?? join(PROJECT_ROOT, ".bridge.json");
-
-const C74 = "/Applications/Max.app/Contents/Resources/C74";
-const MAX_REFPAGES = `${C74}/docs/refpages`;
-const USERGUIDE_DB = `${C74}/docs/userguide/userguide_search.sqlite`;
-const MAX_APP_HELP = `${C74}/help`;
-const MAX_USER_ROOTS = [
-	join(homedir(), "Documents/Max 9/Library"),
-	join(homedir(), "Documents/Max 9/Packages"),
-	"/Users/Shared/Max 9/Packages",
-];
-const REF_DIRS = ["max-ref", "msp-ref", "jit-ref", "m4l-ref"];
-
-function findHelpPatch(maxclass: string): string | null {
-	const filename = `${maxclass}.maxhelp`;
-
-	if (existsSync(MAX_APP_HELP)) {
-		try {
-			const flat = join(MAX_APP_HELP, filename);
-			if (existsSync(flat)) return flat;
-			for (const entry of readdirSync(MAX_APP_HELP, { withFileTypes: true })) {
-				if (!entry.isDirectory()) continue;
-				const p = join(MAX_APP_HELP, entry.name, filename);
-				if (existsSync(p)) return p;
-			}
-		} catch {}
-	}
-
-	for (const root of MAX_USER_ROOTS) {
-		if (!existsSync(root)) continue;
-		try {
-			for (const entry of readdirSync(root, { withFileTypes: true })) {
-				if (!entry.isDirectory()) continue;
-				const p = join(root, entry.name, "help", filename);
-				if (existsSync(p)) return p;
-			}
-		} catch {}
-	}
-
-	return null;
-}
-
-function findRefpage(name: string): string | null {
-	for (const dir of REF_DIRS) {
-		const p = join(MAX_REFPAGES, dir, `${name}.maxref.xml`);
-		if (existsSync(p)) return readFileSync(p, "utf-8");
-	}
-	return null;
-}
-
-let objectIndex: ObjectEntry[] | null = null;
-const getIndex = () => (objectIndex ??= buildIndex(MAX_REFPAGES));
 
 // ---------- result helpers ---------------------------------------------------
 
@@ -95,10 +39,10 @@ const fail = (message: string, data?: Record<string, unknown>): CallToolResult =
 	isError: true,
 });
 
-// Patch for the model: connections by id (`osc:0 → gain:0`), not by index.
-function present(ctx: PatchContext, opts: { rect?: boolean } = {}) {
-	const id = (i: number) => ctx.boxes[i]?.id ?? `#${i}`;
-	const warnings = checkPatch(ctx);
+// Patch for the model: boxes without rect when not needed, selection, warnings.
+function present(ctx: PatchContext, opts: { rect?: boolean; warnings?: boolean } = {}) {
+	const selection = ctx.boxes.filter((b) => b.selected).map((b) => b.id);
+	const warnings = opts.warnings === false ? [] : checkPatch(ctx);
 	return {
 		patch: ctx.patch ?? "",
 		objects: ctx.boxes.map((b) => ({
@@ -110,25 +54,35 @@ function present(ctx: PatchContext, opts: { rect?: boolean } = {}) {
 			outlets: b.numoutlets,
 			...(b.selected ? { selected: true } : {}),
 		})),
-		...(ctx.boxes.some((b) => b.selected) ? { selection: ctx.boxes.filter((b) => b.selected).map((b) => b.id) } : {}),
-		connections: ctx.lines.map((l) => ({ from: id(l.src[0]), outlet: l.src[1], to: id(l.dst[0]), inlet: l.dst[1] })),
+		...(selection.length ? { selection } : {}),
+		connections: ctx.connections,
 		...(warnings.length ? { warnings } : {}),
 	};
 }
 
-async function liveContext(): Promise<{ ctx?: PatchContext; error?: string; note?: string }> {
-	const r = await callBridge(BRIDGE_INFO, "get_context");
-	if (!r.ok) return { error: r.error };
-	return { ctx: r.context as PatchContext, note: r.note as string | undefined };
+const EMPTY: PatchContext = { boxes: [], connections: [] };
+
+async function liveContext() {
+	return callBridge(BRIDGE_INFO, "get_context");
+}
+
+// Read the live patch, or fail the tool call with the bridge error.
+async function withContext(
+	fn: (ctx: PatchContext, note?: string) => CallToolResult | Promise<CallToolResult>,
+): Promise<CallToolResult> {
+	const r = await liveContext();
+	return r.ok && r.context ? fn(r.context, r.note) : fail(r.error ?? "bridge error");
 }
 
 // Mutating bridge command → its result + patch warnings (no full context dump).
-async function mutate(type: string, params: Record<string, unknown>): Promise<CallToolResult> {
-	const { context, ok, error, ...rest } = await callBridge(BRIDGE_INFO, type, params);
-	const warnings = context ? checkPatch(context as PatchContext) : [];
+async function mutate<K extends Exclude<BridgeCommand, "get_context">>(
+	type: K,
+	params: BridgeCommands[K]["params"],
+): Promise<CallToolResult> {
+	const { context, ok, error, ...rest } = await callBridge(BRIDGE_INFO, type, ...([params] as never));
+	const warnings = context ? checkPatch(context) : [];
 	const body = { ok, ...rest, ...(warnings.length ? { warnings } : {}) };
-	if (!ok) return fail(error ?? `${type} failed`, body);
-	return json(body);
+	return ok ? json(body) : fail(error ?? `${type} failed`, body);
 }
 
 // ---------- schemas ------------------------------------------------------------
@@ -177,11 +131,7 @@ function createServer(): McpServer {
 			inputSchema: z.object({}),
 			annotations: READ,
 		},
-		async () => {
-			const { ctx, error, note } = await liveContext();
-			if (!ctx) return fail(error ?? "bridge error");
-			return json({ ...present(ctx), ...(note ? { note } : {}) });
-		},
+		async () => withContext((ctx, note) => json({ ...present(ctx), ...(note ? { note } : {}) })),
 	);
 
 	server.registerTool(
@@ -192,18 +142,17 @@ function createServer(): McpServer {
 			inputSchema: z.object({ id: z.string().describe("Object id from get_patch_context") }),
 			annotations: READ,
 		},
-		async ({ id }) => {
-			const { ctx, error } = await liveContext();
-			if (!ctx) return fail(error ?? "bridge error");
-			const p = present(ctx);
-			const obj = p.objects.find((o) => o.id === id);
-			if (!obj) return fail(`Object "${id}" not found. Ids: ${p.objects.map((o) => o.id).join(", ")}`);
-			return json({
-				object: obj,
-				inputs: p.connections.filter((c) => c.to === id),
-				outputs: p.connections.filter((c) => c.from === id),
-			});
-		},
+		async ({ id }) =>
+			withContext((ctx) => {
+				const p = present(ctx, { warnings: false });
+				const obj = p.objects.find((o) => o.id === id);
+				if (!obj) return fail(`Object "${id}" not found. Ids: ${p.objects.map((o) => o.id).join(", ")}`);
+				return json({
+					object: obj,
+					inputs: p.connections.filter((c) => c.to === id),
+					outputs: p.connections.filter((c) => c.from === id),
+				});
+			}),
 	);
 
 	// --- documentation ---
@@ -340,9 +289,9 @@ function createServer(): McpServer {
 			annotations: WRITE,
 		},
 		async ({ objects, connections }) => {
-			const { ctx } = await liveContext();
-			const origin = originBelow(ctx ?? { boxes: [], lines: [] });
-			const placed = layout(objects, connections, origin).map((o) => ({
+			// Extra round trip only to place new boxes below what's already there.
+			const { context } = await liveContext();
+			const placed = layout(objects, connections, originBelow(context ?? EMPTY)).map((o) => ({
 				name: o.name,
 				x: o.x,
 				y: o.y,
@@ -368,7 +317,7 @@ function createServer(): McpServer {
 		},
 		async ({ text, box, x, y, varname }) => {
 			const spec = toBoxSpec(text, box);
-			if (spec.box === "object" && !spec.classname) return fail("empty text");
+			if (spec.box === "object" && spec.atoms.length === 0) return fail("empty text");
 			return mutate("create_object", { ...spec, x, y, varname });
 		},
 	);
@@ -417,10 +366,9 @@ function createServer(): McpServer {
 			mimeType: "application/json",
 		},
 		async (uri) => {
-			const { ctx, error } = await liveContext();
-			return {
-				contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(ctx ? present(ctx) : { error }) }],
-			};
+			const { context, error } = await liveContext();
+			const text = JSON.stringify(context ? present(context) : { error });
+			return { contents: [{ uri: uri.href, mimeType: "application/json", text }] };
 		},
 	);
 

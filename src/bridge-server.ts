@@ -10,11 +10,7 @@
 
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
-
-export interface BridgeInfo {
-	port: number;
-	token: string;
-}
+import type { BridgeInfo } from "./types/bridge.ts";
 
 type Result = Record<string, unknown> & { ok: boolean };
 

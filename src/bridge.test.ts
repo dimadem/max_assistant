@@ -18,11 +18,11 @@ writeFileSync(infoPath, JSON.stringify(info));
 afterAll(() => bridge.close());
 
 test("round-trips a command through HTTP and the fake Max", async () => {
-	expect(await callBridge(infoPath, "get_context")).toEqual({ ok: true, echo: "get_context" });
+	expect(await callBridge(infoPath, "get_context")).toEqual({ ok: true, echo: "get_context" } as never);
 });
 
 test("times out when Max never answers", async () => {
-	const r = await callBridge(infoPath, "silent");
+	const r = await callBridge(infoPath, "silent" as "get_context");
 	expect(r.ok).toBe(false);
 	expect(r.error).toContain("did not answer");
 });
@@ -34,7 +34,7 @@ test("rejects a wrong token", async () => {
 });
 
 test("reports Max not running when the info file is missing", async () => {
-	expect((await callBridge(join(dir, "missing.json"), "x")).error).toContain("not running");
+	expect((await callBridge(join(dir, "missing.json"), "get_context")).error).toContain("not running");
 });
 
 test("falls back to the next port when busy", async () => {

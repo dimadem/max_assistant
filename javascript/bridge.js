@@ -5,15 +5,12 @@
  * target patcher and answer with `bridgeResult <json>` on outlet 0.
  * No polling, no files, no auto-saving.
  *
- * Command JSON: { requestId, type, ...params }
- *   get_context      { create? }                → { ok, context }
- *   create_object    { box?, classname, args | content, x, y, varname? }
- *   connect_objects  { srcId, srcOutlet, dstId, dstInlet }
- *   delete_object    { id }
- *   disconnect_objects { srcId, srcOutlet, dstId, dstInlet }
- *   create_fragment  { objects:[{name,classname,args,x,y}], connections:[{from,outlet,to,inlet}] }
- *   pin / unpin      lock the target patch (also `pin`/`unpin` messages)
- * Every mutation result carries a fresh `context` snapshot.
+ * Command JSON: { requestId, type, ...params } — the contract (params and
+ * results of every command) is typed in src/types/bridge.ts; keep in sync.
+ * Box specs arrive tokenised: { box, atoms, text } (see src/box-spec.ts).
+ * Every mutation result carries a fresh `context` snapshot
+ * { patch, boxes, connections: [{ from, outlet, to, inlet }] } (box ids).
+ * `pin` / `unpin` messages lock the target patch.
  * Outlet `target <json>` reports the current target { name, pinned } on change.
  */
 
@@ -22,7 +19,7 @@ inlets = 1;
 outlets = 1;
 const jsthis = this; // the [v8] object; `this` is not reliable inside callbacks
 
-const VERSION = "v24";
+const VERSION = "v25";
 post(`bridge.js ${VERSION} loaded\n`);
 
 // ---------- helpers ---------------------------------------------------------
@@ -250,6 +247,11 @@ let registry = []; // [{ obj, id }]
 let registryOwner = ""; // title of the patch the registry belongs to
 let nextObjId = 1;
 
+function clearIds() {
+	registry = [];
+	nextObjId = 1;
+}
+
 function idFor(obj) {
 	if (obj.varname) return obj.varname;
 	for (const r of registry) {
@@ -302,29 +304,29 @@ function snapshot(target) {
 	const objs = listObjects(target);
 	const owner = remember(target)?.title || "";
 	if (owner !== registryOwner) {
-		registry = [];
-		nextObjId = 1;
+		clearIds();
 		registryOwner = owner;
 	}
 	// drop freed objects BEFORE touching them (avoids "bad object" spam)
 	registry = registry.filter((r) => safeValid(r.obj) && objs.some((o) => sameObj(o, r.obj)));
 
-	const indexOf = (o) => {
-		for (let i = 0; i < objs.length; i++) if (sameObj(objs[i], o)) return i;
-		return -1;
+	const ids = objs.map(idFor);
+	const idOf = (o) => {
+		for (let i = 0; i < objs.length; i++) if (sameObj(objs[i], o)) return ids[i];
+		return null;
 	};
-	const boxes = objs.map((obj) => ({
-		id: idFor(obj),
+	const boxes = objs.map((obj, i) => ({
+		id: ids[i],
 		maxclass: obj.maxclass,
 		text: boxText(obj) || knownText[obj.varname] || "",
 		rect: xywh(obj.rect),
 		...(isSelected(obj) ? { selected: true } : {}),
 	}));
-	const lines = [];
+	const connections = [];
 	objs.forEach((obj, i) => {
 		for (const c of obj.patchcords?.outputs || []) {
-			const j = indexOf(c.dstobject);
-			if (j >= 0) lines.push({ src: [i, c.srcoutlet], dst: [j, c.dstinlet] });
+			const to = idOf(c.dstobject);
+			if (to) connections.push({ from: ids[i], outlet: c.srcoutlet, to, inlet: c.dstinlet });
 		}
 	});
 	let name = "";
@@ -333,7 +335,7 @@ function snapshot(target) {
 	} catch (_) {
 		name = target.name || "";
 	}
-	return { patch: name, boxes, lines };
+	return { patch: name, boxes, connections };
 }
 
 function resolveById(target, id) {
@@ -364,78 +366,47 @@ function uniqueName(target, base) {
 }
 
 // ---------- operations ------------------------------------------------------
-
-// ---------- message / comment boxes ----------------------------------------
 //
-// Verified in Max 9.2 (/probe): `set` with "," / ";" as separate atoms gives
-// a real comma (`1 10, 0 500`). setboxattr/setattr("text") do nothing, and
-// `boxtext` reads back EMPTY for message boxes — so we remember what we wrote.
+// Message / comment boxes, verified in Max 9.2 (/probe): `set` with "," / ";"
+// as separate atoms gives a real comma (`1 10, 0 500`). setboxattr/setattr
+// ("text") do nothing, and `boxtext` reads back EMPTY for message boxes — so
+// we remember what we wrote.
 
 const knownText = {}; // varname → content of message boxes we created
 
-function atomsOf(content) {
-	return String(content)
-		.replace(/([,;])/g, " $1 ")
-		.trim()
-		.split(/\s+/)
-		.filter((t) => t !== "")
-		.map((t) => (/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t) ? Number(t) : t));
-}
-
-function createBox(target, spec) {
-	let obj;
-	try {
-		obj = target.newdefault(spec.x, spec.y, spec.box);
-	} catch (e) {
-		return { ok: false, error: `newdefault ${spec.box} failed: ${e}` };
-	}
-	if (isBogus(obj)) return { ok: false, error: `could not create a ${spec.box} box` };
-	const content = String(spec.content || "");
-	if (content.trim()) {
-		try {
-			obj.message.apply(obj, ["set"].concat(atomsOf(content)));
-		} catch (e) {
-			return { ok: false, error: `setting ${spec.box} text failed: ${e}` };
-		}
-	}
-	const name = spec.varname || uniqueName(target, spec.name || spec.box);
-	obj.varname = name;
-	knownText[name] = content;
-	return { ok: true, id: name, obj, maxclass: obj.maxclass };
-}
-
+// spec: { box, atoms, text, x, y, name?, varname? } — atoms come tokenised from TS.
 function createOne(target, spec) {
-	if (spec.box === "message" || spec.box === "comment") return createBox(target, spec);
-	if (!spec.classname) return { ok: false, error: "empty text" };
+	const atoms = spec.atoms || [];
+	const isObject = spec.box !== "message" && spec.box !== "comment";
+	if (isObject && atoms.length === 0) return { ok: false, error: "empty text" };
 	if (spec.varname && nameInUse(target, spec.varname)) {
 		return { ok: false, error: `varname collision: ${spec.varname}` };
 	}
+	const args = isObject ? atoms : [spec.box];
 	let obj;
 	try {
-		obj = target.newdefault.apply(
-			target,
-			[spec.x, spec.y, spec.classname].concat(spec.args || []),
-		);
+		obj = target.newdefault.apply(target, [spec.x, spec.y].concat(args));
 	} catch (e) {
 		return { ok: false, error: `newdefault failed: ${e}` };
 	}
 	if (isBogus(obj)) {
+		if (!isObject) return { ok: false, error: `could not create a ${spec.box} box` };
 		try {
 			if (obj) target.remove(obj);
 		} catch (_) {}
-		return {
-			ok: false,
-			error: `"${spec.classname}" is not a Max object — use search_objects to find the right name`,
-		};
+		return { ok: false, error: `"${atoms[0]}" is not a Max object — use search_objects to find the right name` };
 	}
-	const name = spec.varname || uniqueName(target, spec.name || "mcp");
+	if (!isObject && atoms.length) {
+		try {
+			obj.message.apply(obj, ["set"].concat(atoms));
+		} catch (e) {
+			return { ok: false, error: `setting ${spec.box} text failed: ${e}` };
+		}
+	}
+	const name = spec.varname || uniqueName(target, spec.name || (isObject ? "mcp" : spec.box));
 	obj.varname = name;
-	return {
-		ok: true,
-		id: name,
-		obj,
-		maxclass: obj.maxclass,
-	};
+	if (!isObject) knownText[name] = String(spec.text || "");
+	return { ok: true, id: name, obj, maxclass: obj.maxclass };
 }
 
 function hasCord(src, outlet, dst, inlet) {
@@ -461,41 +432,47 @@ function connectObjs(target, src, srcOutlet, dst, dstInlet) {
 	return null;
 }
 
-const handlers = {
-	get_context(cmd) {
-		const target = pickTarget(!!cmd.create);
-		if (!target) {
-			post(`bridge: no target window. ${JSON.stringify(describeWindows())}\n`);
-			return {
-				ok: true,
-				context: { patch: "", boxes: [], lines: [] },
-				note: `No patch window found besides the assistant. A new one will be opened on the first mutation. tracker=${JSON.stringify({ ...trackerStats, trackerError, lastFocused: lastFocused?.title ?? null })}`,
-			};
-		}
-		return { ok: true, context: snapshot(target) };
-	},
+function resolveCord(target, cmd) {
+	const src = resolveById(target, cmd.srcId);
+	if (!src) return { error: `source object not found: ${cmd.srcId}` };
+	const dst = resolveById(target, cmd.dstId);
+	if (!dst) return { error: `destination object not found: ${cmd.dstId}` };
+	return { src, dst };
+}
 
+const queries = {
+	get_context() {
+		const target = pickTarget(false);
+		if (target) return { ok: true, context: snapshot(target) };
+		post(`bridge: no target window. ${JSON.stringify({ ...describeWindows(), tracker: trackerStats, trackerError })}\n`);
+		return {
+			ok: true,
+			context: { patch: "", boxes: [], connections: [] },
+			note: "No patch window found besides the assistant. A new one will be opened on the first edit.",
+		};
+	},
+};
+
+// Mutations run against the target (opened if needed) and return a fresh snapshot.
+const mutations = {
 	create_object(cmd, target) {
-		const r = createOne(target, cmd);
-		delete r.obj;
+		const { obj: _obj, ...r } = createOne(target, cmd);
 		return r;
 	},
 
 	connect_objects(cmd, target) {
-		const src = resolveById(target, cmd.srcId);
-		if (!src) return { ok: false, error: `source object not found: ${cmd.srcId}` };
-		const dst = resolveById(target, cmd.dstId);
-		if (!dst) return { ok: false, error: `destination object not found: ${cmd.dstId}` };
+		const { src, dst, error } = resolveCord(target, cmd);
+		if (error) return { ok: false, error };
 		const err = connectObjs(target, src, cmd.srcOutlet, dst, cmd.dstInlet);
 		return err ? { ok: false, error: err } : { ok: true };
 	},
 
 	disconnect_objects(cmd, target) {
-		const src = resolveById(target, cmd.srcId);
-		if (!src) return { ok: false, error: `source object not found: ${cmd.srcId}` };
-		const dst = resolveById(target, cmd.dstId);
-		if (!dst) return { ok: false, error: `destination object not found: ${cmd.dstId}` };
-		if (!hasCord(src, cmd.srcOutlet, dst, cmd.dstInlet)) return { ok: false, error: `no patchcord ${cmd.srcId}:${cmd.srcOutlet} → ${cmd.dstId}:${cmd.dstInlet}` };
+		const { src, dst, error } = resolveCord(target, cmd);
+		if (error) return { ok: false, error };
+		if (!hasCord(src, cmd.srcOutlet, dst, cmd.dstInlet)) {
+			return { ok: false, error: `no patchcord ${cmd.srcId}:${cmd.srcOutlet} → ${cmd.dstId}:${cmd.dstInlet}` };
+		}
 		target.disconnect(src, cmd.srcOutlet, dst, cmd.dstInlet);
 		return { ok: true };
 	},
@@ -508,37 +485,35 @@ const handlers = {
 	},
 
 	create_fragment(cmd, target) {
-		const created = {}; // local name → { id, obj }
+		const created = {}; // local name → Maxobj
 		const objects = [];
 		const errors = [];
 		for (const spec of cmd.objects || []) {
 			const r = createOne(target, spec);
 			if (r.ok) {
-				created[spec.name] = r;
+				created[spec.name] = r.obj;
 				objects.push({ name: spec.name, id: r.id });
-				if (r.warning) errors.push(`object "${spec.name}": ${r.warning}`);
 			} else {
-				errors.push(`object "${spec.name}" (${spec.classname || spec.box}): ${r.error}`);
+				errors.push(`object "${spec.name}" (${spec.text || spec.box}): ${r.error}`);
 			}
 		}
-		const resolve = (ref) => created[ref]?.obj || resolveById(target, ref);
+		const resolve = (ref) => created[ref] || resolveById(target, ref);
 		let connected = 0;
 		for (const c of cmd.connections || []) {
+			const cord = `connection ${c.from}:${c.outlet} → ${c.to}:${c.inlet}`;
 			const src = resolve(c.from);
 			const dst = resolve(c.to);
 			if (!src || !dst) {
-				errors.push(`connection ${c.from}:${c.outlet} → ${c.to}:${c.inlet}: unknown ${src ? c.to : c.from}`);
+				errors.push(`${cord}: unknown ${src ? c.to : c.from}`);
 				continue;
 			}
 			const err = connectObjs(target, src, c.outlet, dst, c.inlet);
-			if (err) errors.push(`connection ${c.from}:${c.outlet} → ${c.to}:${c.inlet}: ${err}`);
+			if (err) errors.push(`${cord}: ${err}`);
 			else connected++;
 		}
 		return { ok: errors.length === 0, objects, connected, errors };
 	},
 };
-
-const MUTATIONS = { create_object: 1, connect_objects: 1, disconnect_objects: 1, delete_object: 1, create_fragment: 1 };
 
 function reply(payload) {
 	outlet(0, "bridgeResult", JSON.stringify(payload));
@@ -555,17 +530,17 @@ function command(...atoms) {
 	}
 	const requestId = cmd.requestId;
 	try {
-		const handler = handlers[cmd.type];
-		if (!handler) {
+		if (queries[cmd.type]) {
+			reply({ requestId, ...queries[cmd.type](cmd) });
+			return;
+		}
+		const mutation = mutations[cmd.type];
+		if (!mutation) {
 			reply({ requestId, ok: false, error: `unknown command: ${cmd.type}` });
 			return;
 		}
-		if (!MUTATIONS[cmd.type]) {
-			reply({ requestId, ...handler(cmd) });
-			return;
-		}
 		const target = pickTarget(true);
-		const result = handler(cmd, target);
+		const result = mutation(cmd, target);
 		refreshEntries(target);
 		reply({ requestId, ...result, context: snapshot(target) });
 	} catch (e) {
@@ -576,9 +551,9 @@ function command(...atoms) {
 
 function reset() {
 	createdTarget = null; // lastFocused/pinned are kept: they follow the user
-	registry = [];
+	clearIds();
+	for (const k of Object.keys(knownText)) delete knownText[k];
 	registryOwner = "";
-	nextObjId = 1;
 }
 
 // Stop the tracker when [v8] reloads or the patch closes.
