@@ -1,23 +1,28 @@
 /**
- * bridge.js — runs in [v8].
+ * bridge.js — runs in [v8]. Executes patch commands for the assistant.
  *
- * Two responsibilities:
- *   1. `getcontext` — walk the LIVE patcher (no save to disk) and return a
- *      PatchContext JSON { boxes, lines } to assistant.ts.
- *   2. Command channel — poll `<root>/commands.ndjson` (~150 ms),
- *      execute each new line via the Patcher API, write a result back
- *      via outlet `commandSynced`. assistant.ts then re-syncs
- *      patch-context.json and appends to command-results.ndjson.
+ * Transport: [node.script] sends `command <json>`; we run it against the
+ * target patcher and answer with `bridgeResult <json>` on outlet 0.
+ * No polling, no files, no auto-saving.
+ *
+ * Command JSON: { requestId, type, ...params }
+ *   get_context      { create? }                → { ok, context }
+ *   create_object    { classname, args, x, y, varname? }
+ *   connect_objects  { srcId, srcOutlet, dstId, dstInlet }
+ *   delete_object    { id }
+ *   create_fragment  { objects:[{name,classname,args,x,y}], connections:[{from,outlet,to,inlet}] }
+ * Every mutation result carries a fresh `context` snapshot.
  */
 
 autowatch = 1;
-const jsthis = this;
 inlets = 1;
 outlets = 1;
+const jsthis = this; // the [v8] object; `this` is not reliable inside callbacks
 
-post("bridge.js v9 loaded\n");
+const VERSION = "v12";
+post(`bridge.js ${VERSION} loaded\n`);
 
-// ---------- shared helpers ----------------------------------------------
+// ---------- helpers ---------------------------------------------------------
 
 function topLevel(p) {
 	let cur = p;
@@ -25,33 +30,17 @@ function topLevel(p) {
 	return cur;
 }
 
-// ---------- target patcher -----------------------------------------------
-//
-// Embedded mode: the assistant lives inside the user's patch (bpatcher /
-//   abstraction) → work in that top-level patch, but hide the box that
-//   hosts the assistant.
-// Standalone mode: the assistant is its own window (assistant.maxpat) →
-//   work in the most recently focused OTHER patcher window; if there is none,
-//   open a new one. The choice is made on each prompt (getcontext) and kept
-//   for all commands of that prompt.
-
-let currentTarget = null;
-let createdTarget = null; // window we opened ourselves; reused until `reset`
-
-function ownTop(self) {
-	return topLevel(self.patcher);
+function rectEquals(a, b) {
+	return (
+		a && b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]
+	);
 }
 
-// The box in the top-level patcher that contains the assistant (embedded
-// mode), or null when the assistant is the top-level patcher itself.
-function hostBox(self) {
-	let p = self.patcher;
-	let box = null;
-	while (p.parentpatcher) {
-		box = p.box;
-		p = p.parentpatcher;
-	}
-	return box;
+function sameObj(a, b) {
+	if (!a || !b) return false;
+	if (a === b) return true;
+	if (a.varname && a.varname === b.varname) return true;
+	return a.maxclass === b.maxclass && rectEquals(a.rect, b.rect);
 }
 
 function samePatcher(a, b) {
@@ -72,14 +61,53 @@ function isAlive(p) {
 	}
 }
 
-function isStandalone(self) {
-	const own = ownTop(self);
-	return !hostBox(self) && /^assistant(\.maxpat)?$/.test(own.name || "");
+function isBogus(obj) {
+	return !obj?.maxclass || obj.maxclass === "jbogus";
 }
 
-function pickTarget(self) {
-	const own = ownTop(self);
-	if (!isStandalone(self)) return own;
+// ---------- target patcher --------------------------------------------------
+//
+// Embedded: the assistant sits inside the user's patch (bpatcher/abstraction)
+//   → edit that top-level patch, hiding and protecting the hosting box.
+// Standalone (assistant.maxpat is its own window) → edit the most recently
+//   focused OTHER patcher window; open a new one only when a mutation needs it.
+
+let createdTarget = null;
+let lastFocused = null; // last patcher window the user was in (not the assistant)
+
+// max.frontpatcher is null while commands arrive (e.g. while Claude Desktop
+// or the chat's jweb has focus), so remember the user's patch as they work.
+// One property read every 500 ms — no file I/O.
+const focusTracker = new Task(() => {
+	try {
+		const fp = max.frontpatcher;
+		if (fp && !samePatcher(topLevel(fp), ownTop())) lastFocused = topLevel(fp);
+	} catch (_) {}
+});
+focusTracker.interval = 500;
+focusTracker.repeat();
+
+function ownTop() {
+	return topLevel(jsthis.patcher);
+}
+
+function hostBox() {
+	let p = jsthis.patcher;
+	let box = null;
+	while (p.parentpatcher) {
+		box = p.box;
+		p = p.parentpatcher;
+	}
+	return box;
+}
+
+function isStandalone() {
+	return !hostBox() && /^assistant(\.maxpat)?$/.test(ownTop().name || "");
+}
+
+function pickTarget(allowCreate) {
+	const own = ownTop();
+	if (!isStandalone()) return own;
 
 	let w = max.frontpatcher ? max.frontpatcher.wind : null;
 	let guard = 0;
@@ -88,58 +116,70 @@ function pickTarget(self) {
 		if (p && !samePatcher(p, own) && w.visible) return p;
 		w = w.next;
 	}
+	if (isAlive(lastFocused)) return lastFocused;
 	if (isAlive(createdTarget)) return createdTarget;
+	if (!allowCreate) {
+		post(`bridge: no target window. ${JSON.stringify(describeWindows())}\n`);
+		return null;
+	}
 	createdTarget = new Patcher(80, 80, 780, 620);
 	createdTarget.wind.visible = 1;
 	createdTarget.wind.title = "assistant work";
-	post("bridge: opened new patcher for the assistant\n");
+	post("bridge: opened a new patcher for the assistant\n");
 	return createdTarget;
 }
 
-function targetFor(self) {
-	if (isAlive(currentTarget)) return currentTarget;
-	currentTarget = pickTarget(self);
-	return currentTarget;
+// Diagnostics: what [v8] sees when it walks the window list.
+function describeWindows() {
+	const own = ownTop();
+	const out = {
+		own: own.name,
+		standalone: isStandalone(),
+		lastFocused: isAlive(lastFocused) ? lastFocused.name : null,
+		front: null,
+		windows: [],
+	};
+	let w = null;
+	try {
+		w = max.frontpatcher ? max.frontpatcher.wind : null;
+		out.front = max.frontpatcher ? max.frontpatcher.name : null;
+	} catch (e) {
+		out.front = `error: ${e}`;
+	}
+	let guard = 0;
+	while (w && guard++ < 50) {
+		let d = {};
+		try {
+			d = { title: w.title, visible: w.visible, cls: w.assocclass, hasAssoc: !!w.assoc, isOwn: samePatcher(w.assoc, own) };
+		} catch (e) {
+			d = { error: String(e) };
+		}
+		out.windows.push(d);
+		w = w.next;
+	}
+	return out;
 }
 
-function reset() {
-	currentTarget = null;
-	createdTarget = null;
-	registry = [];
-	registryOwner = null;
-	nextObjId = 1;
-}
+// ---------- stable ids + snapshot -------------------------------------------
+//
+// Objects without a varname get `obj-<n>` ids that live as long as the object
+// and are never reused, so deleting one object can't re-point another id.
 
-// ---------- live patch snapshot ------------------------------------------
-
-// Stable ids for objects without a varname. An object keeps its `obj-<n>`
-// for as long as it lives; numbers are never reused, so deleting obj-1 can't
-// make "obj-2" suddenly point at a different object.
 let registry = []; // [{ obj, id }]
-let registryOwner = null; // patcher the registry belongs to
+let registryOwner = null;
 let nextObjId = 1;
 
 function idFor(obj) {
 	if (obj.varname) return obj.varname;
-	for (const r of registry) if (sameObj(r.obj, obj)) {
-		r.obj = obj; // refresh wrapper (and rect, if it moved)
-		return r.id;
+	for (const r of registry) {
+		if (sameObj(r.obj, obj)) {
+			r.obj = obj;
+			return r.id;
+		}
 	}
 	const id = `obj-${nextObjId++}`;
 	registry.push({ obj, id });
 	return id;
-}
-
-function lookupId(id) {
-	for (const r of registry) if (r.id === id) return r.obj;
-	return null;
-}
-
-function sameObj(a, b) {
-	if (!a || !b) return false;
-	if (a === b) return true;
-	if (a.varname && a.varname === b.varname) return true;
-	return a.maxclass === b.maxclass && rectEquals(a.rect, b.rect);
 }
 
 function boxText(obj) {
@@ -150,26 +190,30 @@ function boxText(obj) {
 	}
 }
 
-function snapshot(target, skip) {
+function listObjects(target) {
+	const skip = hostBox();
 	const objs = [];
 	target.apply((obj) => {
 		if (!sameObj(obj, skip)) objs.push(obj);
 		return true;
 	});
+	return objs;
+}
+
+function snapshot(target) {
+	const objs = listObjects(target);
 	if (!samePatcher(registryOwner, target)) {
 		registry = [];
 		nextObjId = 1;
 		registryOwner = target;
 	}
-	// forget objects that no longer exist
 	registry = registry.filter((r) => objs.some((o) => sameObj(o, r.obj)));
 
 	const indexOf = (o) => {
 		for (let i = 0; i < objs.length; i++) if (sameObj(objs[i], o)) return i;
 		return -1;
 	};
-
-	const boxes = objs.map((obj, i) => ({
+	const boxes = objs.map((obj) => ({
 		id: idFor(obj),
 		maxclass: obj.maxclass,
 		text: boxText(obj),
@@ -177,11 +221,9 @@ function snapshot(target, skip) {
 		numinlets: obj.numinlets,
 		numoutlets: obj.numoutlets,
 	}));
-
 	const lines = [];
 	objs.forEach((obj, i) => {
-		const outs = obj.patchcords?.outputs || [];
-		for (const c of outs) {
+		for (const c of obj.patchcords?.outputs || []) {
 			const j = indexOf(c.dstobject);
 			if (j >= 0) lines.push({ src: [i, c.srcoutlet], dst: [j, c.dstinlet] });
 		}
@@ -195,300 +237,198 @@ function snapshot(target, skip) {
 	return { patch: name, boxes, lines };
 }
 
-function getcontext() {
-	try {
-		currentTarget = pickTarget(this); // re-pick on every prompt
-		const ctx = snapshot(currentTarget, hostBox(this));
-		outlet(0, "bridgeResponse", "context", JSON.stringify(ctx));
-	} catch (e) {
-		post(`bridge: getcontext failed: ${e}\n${e?.stack || ""}\n`);
-		outlet(0, "bridgeResponse", "context", JSON.stringify({ boxes: [], lines: [] }));
-	}
-}
-
-// ---------- command channel ---------------------------------------------
-
-let COMMANDS_PATH = null;
-let commandsOffset = 0;
-const seenIds = {};
-let poller = null;
-
-// id → Maxobj for objects this session created. Survives recompile via the
-// `mcp_<n>` varname assigned at creation; resolveById uses getnamed when the
-// Map is empty after [v8] reload.
-const mcpObjects = {};
-let mcpCounter = 1;
-
-function config(root) {
-	if (!root) {
-		post("bridge: config called with empty root\n");
-		return;
-	}
-	COMMANDS_PATH = `${root}/commands.ndjson`;
-	commandsOffset = 0;
-	if (!poller) {
-		poller = new Task(pollCommands, this);
-		poller.interval = 150;
-		poller.repeat();
-		post(`bridge: command poller started, root=${root}\n`);
-	}
-}
-
-function pollCommands() {
-	const self = this?.patcher ? this : jsthis;
-	if (!COMMANDS_PATH) return;
-	const f = new File(COMMANDS_PATH, "read");
-	if (!f.isopen) return;
-	// File was truncated since last poll (e.g. fresh node.script start).
-	if (f.eof < commandsOffset) commandsOffset = 0;
-	if (f.eof <= commandsOffset) {
-		f.close();
-		return;
-	}
-	f.position = commandsOffset;
-	while (f.position < f.eof) {
-		const line = f.readline(8192);
-		if (!line) break;
-		const trimmed = line.replace(/[\r\n]+$/, "");
-		if (!trimmed) continue;
-		let cmd = null;
-		try {
-			cmd = JSON.parse(trimmed);
-		} catch (e) {
-			post(`bridge: bad command JSON: ${e} line=${trimmed}\n`);
-			continue;
-		}
-		if (cmd?.requestId && !seenIds[cmd.requestId]) {
-			seenIds[cmd.requestId] = true;
-			try {
-				executeCommand.call(self, cmd);
-			} catch (e) {
-				post(`bridge: ${cmd.type} failed: ${e}\n${e?.stack || ""}\n`);
-				outlet(
-					0,
-					"commandSynced",
-					JSON.stringify({
-						requestId: cmd.requestId,
-						context: null,
-						result: { ok: false, error: `bridge exception: ${e}` },
-					}),
-				);
-			}
-		}
-	}
-	commandsOffset = f.position;
-	f.close();
-}
-
-function sendResult(requestId, target, result) {
-	const payload = {
-		requestId: requestId,
-		context: target ? snapshot(target, hostBoxCache) : null,
-		result: result,
-	};
-	outlet(0, "commandSynced", JSON.stringify(payload));
-}
-
-let hostBoxCache = null;
-
-function executeCommand(cmd) {
-	const target = targetFor(this);
-	hostBoxCache = hostBox(this);
-	if (cmd.type === "create_object") {
-		handleCreateObject(target, cmd);
-	} else if (cmd.type === "connect_objects") {
-		handleConnectObjects(target, cmd);
-	} else if (cmd.type === "delete_object") {
-		handleDeleteObject(target, cmd);
-	} else {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `unknown command type: ${cmd.type}`,
-		});
-	}
-}
-
-// ---------- object resolver ---------------------------------------------
-
-function rectEquals(a, b) {
-	return (
-		a && b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]
-	);
-}
-
 function resolveById(target, id) {
-	const obj = resolveRaw(target, id);
-	return obj && sameObj(obj, hostBoxCache) ? null : obj; // never touch the assistant
-}
-
-function resolveRaw(target, id) {
 	if (!id) return null;
-	const own = mcpObjects[id];
-	if (own?.maxclass) return own;
+	let obj = null;
 	const byName = target.getnamed(id);
-	if (byName?.maxclass) return byName;
-	const obj = lookupId(id);
-	return obj?.maxclass ? obj : null;
+	if (byName?.maxclass) obj = byName;
+	else {
+		snapshot(target); // make sure registry is current
+		for (const r of registry) if (r.id === id) obj = r.obj;
+	}
+	if (!obj?.maxclass) return null;
+	return sameObj(obj, hostBox()) ? null : obj; // never touch the assistant
 }
 
 function nameInUse(target, name) {
-	const existing = target.getnamed(name);
-	// In v8, getnamed returns a Maxobj-like even for missing names; check maxclass.
-	return !!existing?.maxclass;
+	return !!target.getnamed(name)?.maxclass;
 }
 
-function nextMcpName(target) {
-	for (let i = 0; i < 10000; i++) {
-		const name = `mcp_${mcpCounter}`;
-		mcpCounter++;
-		if (!nameInUse(target, name)) return name;
+function uniqueName(target, base) {
+	const clean = String(base || "mcp").replace(/[^A-Za-z0-9_]/g, "_");
+	if (!nameInUse(target, clean)) return clean;
+	for (let i = 2; i < 10000; i++) {
+		const n = `${clean}_${i}`;
+		if (!nameInUse(target, n)) return n;
 	}
-	return `mcp_${Date.now()}`; // pathological fallback
+	return `${clean}_${Date.now()}`;
 }
 
-function handleCreateObject(target, cmd) {
-	const classname = cmd.classname;
-	const args = cmd.args || [];
-	if (!classname) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: "empty text",
-		});
-		return;
-	}
-	if (cmd.varname && nameInUse(target, cmd.varname)) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `varname collision: ${cmd.varname}`,
-		});
-		return;
+// ---------- operations ------------------------------------------------------
+
+function createOne(target, spec) {
+	if (!spec.classname) return { ok: false, error: "empty text" };
+	if (spec.varname && nameInUse(target, spec.varname)) {
+		return { ok: false, error: `varname collision: ${spec.varname}` };
 	}
 	let obj;
 	try {
-		const fnArgs = [cmd.x, cmd.y, classname].concat(args);
-		obj = target.newdefault.apply(target, fnArgs);
+		obj = target.newdefault.apply(
+			target,
+			[spec.x, spec.y, spec.classname].concat(spec.args || []),
+		);
 	} catch (e) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `newdefault failed: ${e}`,
-		});
-		return;
+		return { ok: false, error: `newdefault failed: ${e}` };
 	}
-	if (!obj?.maxclass) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `unknown maxclass: ${classname}`,
-		});
-		return;
-	}
-	const name = cmd.varname || nextMcpName(target);
-	try {
-		obj.varname = name;
-	} catch (e) {
-		// If varname assignment fails for some reason, roll back.
+	if (isBogus(obj)) {
 		try {
-			target.remove(obj);
-		} catch (_) {
-			/* ignore */
-		}
-		sendResult(cmd.requestId, target, {
+			if (obj) target.remove(obj);
+		} catch (_) {}
+		return {
 			ok: false,
-			error: `failed to set varname '${name}': ${e}`,
-		});
-		return;
+			error: `"${spec.classname}" is not a Max object — use search_objects to find the right name`,
+		};
 	}
-	mcpObjects[name] = obj;
-
-	sendResult(cmd.requestId, target, {
+	const name = spec.varname || uniqueName(target, spec.name || "mcp");
+	obj.varname = name;
+	return {
 		ok: true,
 		id: name,
-		text: cmd.text,
+		obj,
 		maxclass: obj.maxclass,
-		rect: obj.rect,
 		numinlets: obj.numinlets,
 		numoutlets: obj.numoutlets,
-	});
+	};
 }
 
-function handleConnectObjects(target, cmd) {
-	const src = resolveById(target, cmd.srcId);
-	if (!src) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `source object not found: ${cmd.srcId} — try get_patch_context`,
-		});
-		return;
+function connectObjs(target, src, srcOutlet, dst, dstInlet) {
+	if (typeof srcOutlet !== "number" || srcOutlet < 0 || srcOutlet >= src.numoutlets) {
+		return `outlet ${srcOutlet} out of range (numoutlets=${src.numoutlets})`;
 	}
-	const dst = resolveById(target, cmd.dstId);
-	if (!dst) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `destination object not found: ${cmd.dstId} — try get_patch_context`,
-		});
-		return;
-	}
-	const srcOutlet = cmd.srcOutlet;
-	const dstInlet = cmd.dstInlet;
-	if (
-		typeof srcOutlet !== "number" ||
-		srcOutlet < 0 ||
-		srcOutlet >= src.numoutlets
-	) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `srcOutlet ${srcOutlet} out of range (numoutlets=${src.numoutlets})`,
-		});
-		return;
-	}
-	if (
-		typeof dstInlet !== "number" ||
-		dstInlet < 0 ||
-		dstInlet >= dst.numinlets
-	) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `dstInlet ${dstInlet} out of range (numinlets=${dst.numinlets})`,
-		});
-		return;
+	if (typeof dstInlet !== "number" || dstInlet < 0 || dstInlet >= dst.numinlets) {
+		return `inlet ${dstInlet} out of range (numinlets=${dst.numinlets})`;
 	}
 	try {
 		target.connect(src, srcOutlet, dst, dstInlet);
 	} catch (e) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `connect failed: ${e}`,
-		});
-		return;
+		return `connect failed: ${e}`;
 	}
-	sendResult(cmd.requestId, target, { ok: true });
+	return null;
 }
 
-function handleDeleteObject(target, cmd) {
-	const obj = resolveById(target, cmd.id);
-	if (!obj) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `object not found: ${cmd.id} — try get_patch_context`,
-		});
-		return;
-	}
-	try {
+const handlers = {
+	get_context(cmd) {
+		const target = pickTarget(!!cmd.create);
+		if (!target) {
+			return {
+				ok: true,
+				context: { patch: "", boxes: [], lines: [] },
+				note: "No patch window found besides the assistant. A new one will be opened on the first mutation.",
+				debug: describeWindows(),
+			};
+		}
+		return { ok: true, context: snapshot(target) };
+	},
+
+	create_object(cmd, target) {
+		const r = createOne(target, cmd);
+		delete r.obj;
+		return r;
+	},
+
+	connect_objects(cmd, target) {
+		const src = resolveById(target, cmd.srcId);
+		if (!src) return { ok: false, error: `source object not found: ${cmd.srcId}` };
+		const dst = resolveById(target, cmd.dstId);
+		if (!dst) return { ok: false, error: `destination object not found: ${cmd.dstId}` };
+		const err = connectObjs(target, src, cmd.srcOutlet, dst, cmd.dstInlet);
+		return err ? { ok: false, error: err } : { ok: true };
+	},
+
+	delete_object(cmd, target) {
+		const obj = resolveById(target, cmd.id);
+		if (!obj) return { ok: false, error: `object not found: ${cmd.id}` };
 		target.remove(obj);
-	} catch (e) {
-		sendResult(cmd.requestId, target, {
-			ok: false,
-			error: `remove failed: ${e}`,
-		});
-		return;
-	}
-	// Drop our own bookkeeping entry if present (so a future create_object
-	// can reuse the freed mcp_<n> name without colliding via getnamed).
-	if (mcpObjects[cmd.id]) delete mcpObjects[cmd.id];
-	sendResult(cmd.requestId, target, { ok: true });
+		return { ok: true };
+	},
+
+	create_fragment(cmd, target) {
+		const created = {}; // local name → { id, obj }
+		const objects = [];
+		const errors = [];
+		for (const spec of cmd.objects || []) {
+			const r = createOne(target, spec);
+			if (r.ok) {
+				created[spec.name] = r;
+				objects.push({ name: spec.name, id: r.id, numinlets: r.numinlets, numoutlets: r.numoutlets });
+			} else {
+				errors.push(`object "${spec.name}" (${spec.classname}): ${r.error}`);
+			}
+		}
+		const resolve = (ref) => created[ref]?.obj || resolveById(target, ref);
+		let connected = 0;
+		for (const c of cmd.connections || []) {
+			const src = resolve(c.from);
+			const dst = resolve(c.to);
+			if (!src || !dst) {
+				errors.push(`connection ${c.from}:${c.outlet} → ${c.to}:${c.inlet}: unknown ${src ? c.to : c.from}`);
+				continue;
+			}
+			const err = connectObjs(target, src, c.outlet, dst, c.inlet);
+			if (err) errors.push(`connection ${c.from}:${c.outlet} → ${c.to}:${c.inlet}: ${err}`);
+			else connected++;
+		}
+		return { ok: errors.length === 0, objects, connected, errors };
+	},
+};
+
+const MUTATIONS = { create_object: 1, connect_objects: 1, delete_object: 1, create_fragment: 1 };
+
+function reply(payload) {
+	outlet(0, "bridgeResult", JSON.stringify(payload));
 }
 
-// Register handlers — top-level `function` declarations don't always reach
-// the Max dispatch table in v8, so attach explicitly too.
-globalThis.getcontext = getcontext;
-globalThis.config = config;
+// Entry point: `command <json>` (Max may split the symbol into atoms — rejoin).
+function command(...atoms) {
+	let cmd = null;
+	try {
+		cmd = JSON.parse(atoms.join(" "));
+	} catch (e) {
+		post(`bridge: bad command JSON: ${e}\n`);
+		return;
+	}
+	const requestId = cmd.requestId;
+	try {
+		const handler = handlers[cmd.type];
+		if (!handler) {
+			reply({ requestId, ok: false, error: `unknown command: ${cmd.type}` });
+			return;
+		}
+		if (!MUTATIONS[cmd.type]) {
+			reply({ requestId, ...handler(cmd) });
+			return;
+		}
+		const target = pickTarget(true);
+		const result = handler(cmd, target);
+		reply({ requestId, ...result, context: snapshot(target) });
+	} catch (e) {
+		post(`bridge: ${cmd.type} failed: ${e}\n${e?.stack || ""}\n`);
+		reply({ requestId, ok: false, error: `bridge exception: ${e}` });
+	}
+}
+
+function reset() {
+	createdTarget = null; // lastFocused is kept: it follows the user, not the chat
+	registry = [];
+	registryOwner = null;
+	nextObjId = 1;
+}
+
+// Stop the tracker when [v8] reloads or the patch closes.
+function notifydeleted() {
+	focusTracker.cancel();
+}
+
+// Top-level functions don't always reach Max's dispatch table in v8.
+globalThis.command = command;
 globalThis.reset = reset;

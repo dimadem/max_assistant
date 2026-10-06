@@ -6,28 +6,49 @@ MCP tools.
 
 ## Overview
 
-The user types a question in the `[jweb]` chat. `assistant.ts` (running
-in `[node.script]`) asks `[v8 bridge.js]` for the top-level patcher's
-file path, reads the `.maxpat` JSON, writes a normalised snapshot to
-`patch-context.json`, and spawns `claude --mcp-config .mcp.json`. Three
-MCP tools (`get_patch_context`, `get_object_connections`,
-`get_object_docs`, `get_object_help`) let the agent inspect the live
-patch, the Max reference pages, and help (example) patches. The
-reply is sent back to `[jweb]` and appended to the chat.
+The project has two halves:
+
+- **Max side** — `patchers/assistant.maxpat` (open via `max_assistant.maxproj`).
+  `[node.script assistant.js]` runs a local HTTP bridge and the chat;
+  `[v8 bridge.js]` executes patch commands against the live patcher.
+- **MCP server** — `code/mcp-server.js` exposes the patch-building tools.
+  Any MCP client can use it: the chat inside Max (spawns the `claude` CLI),
+  Claude Desktop, Claude Code, etc. The rules for using the tools are sent
+  as MCP server `instructions`, so every client gets them.
+
+```
+ Claude (Max chat / Desktop / Code)
+        │ stdio (MCP)
+        ▼
+ code/mcp-server.js ──HTTP 127.0.0.1 (.bridge.json: port+token)──►
+        [node.script assistant.js] ──`command <json>`──► [v8 bridge.js] ──► live patcher
+                                   ◄─`bridgeResult <json>`──
+```
+
+Nothing is saved to disk and nothing polls: commands are request/response
+messages, and the patch is read live (`Patcher.apply` + `Maxobj.patchcords`).
+
+### Which patch gets edited
+
+- Assistant opened on its own (`assistant.maxpat` window): the most recently
+  focused **other** patcher window. Click your patch, then the chat. With no
+  other window open, the first mutation opens a new "assistant work" patcher.
+- Assistant embedded in your patch (as a `bpatcher`/abstraction): that patch.
+  The box hosting the assistant is hidden from the agent and can't be
+  deleted or connected by it.
 
 ## Features
 
-- **Patch analysis** — full list of objects and connections, plus
-  per-object inputs/outputs.
-- **Max reference lookup** — MCP tool reads `*.maxref.xml` for any
-  `maxclass`.
-- **Help patch lookup** — MCP tool returns the normalised contents of
-  the `.maxhelp` example patch for a given `maxclass` (searches the Max
-  application bundle and installed packages).
-- **Session continuity** — subsequent prompts resume the same Claude
-  session until `new chat`.
-- **Typed protocol** — selector constants and JSON text codec in
-  `src/types/protocol.ts`, imported by both Max-side and jweb-side.
+- **Live patch context** — objects, stable ids (`varname` or `obj-<n>`),
+  connections; no auto-save.
+- **Object search** — `search_objects` finds objects by what they do
+  (index over all `*.maxref.xml`).
+- **Reference + help lookup** — `get_object_docs`, `get_object_help`.
+- **Patch editing** — `create_object`, `create_patch_fragment` (many objects
+  + cords in one call, auto-layout), `connect_objects`, `delete_object`.
+- **Self-checks** — every result carries `warnings`: signal feedback loops
+  without a delay ("infinite recursion") and invalid (`jbogus`) objects.
+- **Session continuity** in the Max chat until `new chat`.
 
 ## Installation
 
@@ -50,12 +71,37 @@ Iterating on the UI without Max:
 bun run dev:ui                # http://localhost:5173 (Bun static server)
 ```
 
+### Use from Claude Desktop / Claude Code
+
+Max must be running with `max_assistant.maxproj` open (that starts the bridge).
+
+Claude Desktop — `~/Library/Application Support/Claude/claude_desktop_config.json`
+(use the absolute path to `bun`, Desktop doesn't inherit your shell PATH):
+
+```json
+{
+  "mcpServers": {
+    "max-msp": {
+      "command": "/Users/<you>/.bun/bin/bun",
+      "args": ["/path/to/max_assistant/code/mcp-server.js"]
+    }
+  }
+}
+```
+
+Claude Code:
+
+```bash
+claude mcp add max-msp -- bun /path/to/max_assistant/code/mcp-server.js
+```
+
 ## Scripts
 
 | Command                 | Purpose                                                     |
 | ----------------------- | ----------------------------------------------------------- |
-| `bun run build`         | `build:agent && build:ui`                                   |
+| `bun run build`         | `build:agent && build:mcp && build:ui`                      |
 | `bun run build:agent`   | `src/assistant.ts` → `code/assistant.js` (node target)      |
+| `bun run build:mcp`     | `src/mcp-server.ts` → `code/mcp-server.js` (bun target)     |
 | `bun run build:ui`      | `src/ui/app.ts` → `ui/app.js` (browser IIFE)                |
 | `bun run dev`           | run `src/assistant.ts` directly (no bundle)                 |
 | `bun run dev:ui`        | Bun static server over `ui/`                                |
@@ -66,7 +112,7 @@ bun run dev:ui                # http://localhost:5173 (Bun static server)
 
 - **Runtime**: Bun
 - **Agent**: [Claude Code](https://claude.com/claude-code) CLI spawned as a subprocess
-- **MCP tools**: `@modelcontextprotocol/sdk` + `zod` (patch introspection)
+- **MCP tools**: `@modelcontextprotocol/sdk` + `zod`
 - **Max integration**: `max-api` (Node-for-Max), `[v8]`, `[jweb]`
 - **UI**: vanilla TypeScript → browser IIFE, no framework
 
@@ -197,7 +243,8 @@ In the patch the routing is:
                                      │          │
                                      ▼          ▼
                              [v8 bridge.js]   [jweb]    ← everything that
-                                                         isn't "bridge"
+                                   │                     isn't "bridge"
+                                   └──► bridgeResult ──► [node.script]
 ```
 
 ### DevTools
@@ -226,54 +273,59 @@ classes are not available inside `jweb`.
 
 ```
 src/
-  assistant.ts          entry point for [node.script]; spawns claude, routes UI
-  mcp-server.ts         MCP server with three tools (stdio transport)
+  assistant.ts          [node.script] entry: chat, spawns claude, runs the bridge
+  bridge-server.ts      local HTTP endpoint → `command` to [v8], awaits `bridgeResult`
+  bridge-client.ts      used by the MCP server to call the bridge (.bridge.json)
+  mcp-server.ts         MCP tools + instructions (stdio)
+  object-index.ts       search index over *.maxref.xml
+  layout.ts             auto-layout for create_patch_fragment
+  patch-checks.ts       warnings: signal feedback loops, jbogus objects
+  parse-object-text.ts  "cycle~ 440" → { classname, args }
   types/
-    max.ts              RawMaxpat / PatchContext + convertMaxpat
+    max.ts              PatchContext, RawMaxpat + convertMaxpat (help patches)
     protocol.ts         Max ↔ jweb selectors and JSON text codec
-  ui/
-    app.ts              jweb entry: bindInlet / outlet handlers
-scripts/
-  ui-server.ts          Bun static server for UI (port 5173)
+  ui/app.ts             jweb entry
+scripts/ui-server.ts    Bun static server for UI (port 5173)
 code/
   assistant.js          build artifact — loaded by [node.script]
-javascript/
-  bridge.js             [v8] code; walks to top-level patcher and returns filepath
-ui/
-  index.html            chat layout (header / log / input / status-bar)
-  style.css             flat grey-white palette, system mono font
-  app.js                build artifact — loaded by [jweb]
-patchers/
-  assistant.maxpat      the single user-facing patch
-docs/                   Max 9 PDF reference (see Documentation below)
-.mcp.json               MCP server config for claude
-patch-context.json      auto-generated patch snapshot (gitignored)
+  mcp-server.js         build artifact — MCP server for any client
+javascript/bridge.js    [v8]: target-patcher choice, live snapshot, commands
+ui/                     index.html, style.css, app.js (build artifact)
+patchers/assistant.maxpat
+max_assistant.maxproj   open this in Max
+docs/                   Max 9 PDF reference
+.mcp.json               MCP config for the claude CLI spawned by the chat
+.bridge.json            runtime: bridge port + token (gitignored)
 ```
 
-`code/assistant.js` and `ui/app.js` are build artifacts tracked in git so the
-package works without Bun installed (Max loads them directly). Source lives in
-`src/` — edit there and run `bun run build`.
+`code/*.js` and `ui/app.js` are build artifacts tracked in git so Max loads
+them without a build step. Edit `src/` and run `bun run build`.
 
-## Request flow
+## Request flow (chat inside Max)
 
-1. User submits text in `[jweb]` → `outlet("prompt", text)`.
-2. `assistant.ts` queues the prompt, sends `busy 1` + `status "getting patch context…"` + `bridge getcontext` to `[v8]`.
-3. `bridge.js` walks to the top-level patcher, calls `write`, returns the filepath.
-4. `assistant.ts` reads the `.maxpat`, normalises it via `convertMaxpat`, writes `patch-context.json`.
-5. Spawns `claude --print --mcp-config .mcp.json --session-id|--resume`.
-6. Parses the JSON result, sends `appendAssistant {"text":"…"}` to `[jweb]`; sends `busy 0` + `status "ready"`.
+1. `[jweb]` → `prompt <text>` → `assistant.ts` spawns
+   `claude --print --mcp-config .mcp.json --strict-mcp-config --session-id|--resume`.
+2. Claude calls MCP tools; each tool POSTs to the bridge
+   (`127.0.0.1:<port>/command`, header `x-bridge-token`).
+3. `assistant.ts` forwards `command <json>` to `[v8]`; `bridge.js` picks the
+   target patcher, runs the command, replies `bridgeResult <json>` (mutations
+   include a fresh snapshot, which the MCP server turns into `warnings`).
+4. The final answer goes to `[jweb]` as `appendAssistant`.
 
-The Claude session ID is kept in `currentSessionId` for conversation continuity.
-A `clear` message resets it.
+`new chat` resets the Claude session and the bridge's target/id registry.
 
 ## MCP tools
 
-Defined in `src/mcp-server.ts`; spawned by `claude` via `.mcp.json`; read from
-`patch-context.json` (refreshed each prompt):
-
-- `get_patch_context` — all objects and connections in the current patch
-- `get_connections(id)` — inputs/outputs of a specific object by id or varname
-- `get_object_docs(maxclass)` — Max reference page for an object type (XML from `/Applications/Max.app/Contents/Resources/C74/docs/refpages`)
+| Tool | Purpose |
+| ---- | ------- |
+| `get_patch_context` | live patch: `patch` title, boxes, lines, warnings |
+| `get_object_connections(id)` | inputs/outputs of one object |
+| `search_objects(query)` | find objects by functionality |
+| `get_object_docs(maxclass)` | reference page (`*.maxref.xml`) |
+| `get_object_help(maxclass)` | help patch as boxes/lines |
+| `create_object(text,x,y)` | one object |
+| `create_patch_fragment(objects, connections)` | many objects + cords, auto-layout |
+| `connect_objects` / `delete_object` | patchcords / removal |
 
 ## Documentation (`docs/`)
 

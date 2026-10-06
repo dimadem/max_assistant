@@ -6517,7 +6517,7 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // src/mcp-server.ts
-import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync3 } from "fs";
+import { existsSync as existsSync2, readdirSync as readdirSync2, readFileSync as readFileSync3 } from "fs";
 import { homedir } from "os";
 import { dirname, join as join2 } from "path";
 import { fileURLToPath } from "url";
@@ -28410,44 +28410,70 @@ class StdioServerTransport {
   }
 }
 
-// src/command-channel.ts
-import { randomUUID } from "crypto";
-import { appendFileSync, existsSync, readFileSync } from "fs";
-var POLL_INTERVAL_MS = 50;
-var DEFAULT_TIMEOUT_MS = 5000;
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function sendCommand(commandsPath, resultsPath, type, params, timeoutMs = DEFAULT_TIMEOUT_MS) {
-  const requestId = randomUUID();
-  const cmd = { requestId, type, ...params };
-  appendFileSync(commandsPath, `${JSON.stringify(cmd)}
-`);
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (existsSync(resultsPath)) {
-      const content = readFileSync(resultsPath, "utf-8");
-      const lines = content.split(`
-`);
-      for (const line of lines) {
-        if (!line)
-          continue;
-        try {
-          const r = JSON.parse(line);
-          if (r.requestId === requestId)
-            return r;
-        } catch {}
+// src/bridge-client.ts
+import { readFileSync } from "fs";
+var NOT_RUNNING = "Max assistant is not running. Open max_assistant.maxproj in Max (the [node.script] starts the bridge).";
+async function callBridge(infoPath, type, params = {}) {
+  let info;
+  try {
+    info = JSON.parse(readFileSync(infoPath, "utf-8"));
+  } catch {
+    return { ok: false, error: NOT_RUNNING };
+  }
+  try {
+    const res = await fetch(`http://127.0.0.1:${info.port}/command`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-bridge-token": info.token },
+      body: JSON.stringify({ type, ...params })
+    });
+    return await res.json();
+  } catch {
+    return { ok: false, error: NOT_RUNNING };
+  }
+}
+
+// src/layout.ts
+var COL = 150;
+var ROW = 50;
+var MARGIN = 40;
+function originBelow(ctx) {
+  if (ctx.boxes.length === 0)
+    return { x: MARGIN, y: MARGIN };
+  const x = Math.min(...ctx.boxes.map((b) => b.rect[0]));
+  const bottom = Math.max(...ctx.boxes.map((b) => b.rect[1] + b.rect[3]));
+  return { x: Math.max(x, MARGIN), y: bottom + MARGIN };
+}
+function layout(objects, edges, origin) {
+  const names = new Set(objects.map((o) => o.name));
+  const local = edges.filter((e) => names.has(e.from) && names.has(e.to) && e.from !== e.to);
+  const depth = new Map(objects.map((o) => [o.name, 0]));
+  for (let pass = 0;pass < objects.length; pass++) {
+    let changed = false;
+    for (const e of local) {
+      const d = (depth.get(e.from) ?? 0) + 1;
+      if (d > (depth.get(e.to) ?? 0) && d < objects.length) {
+        depth.set(e.to, d);
+        changed = true;
       }
     }
-    await sleep(POLL_INTERVAL_MS);
+    if (!changed)
+      break;
   }
-  return {
-    requestId,
-    ok: false,
-    error: `Command "${type}" timed out after ${timeoutMs}ms`
-  };
+  const colInRow = new Map;
+  return objects.map((o) => {
+    const d = depth.get(o.name) ?? 0;
+    const col = colInRow.get(d) ?? 0;
+    colInRow.set(d, col + 1);
+    return {
+      ...o,
+      x: o.x ?? origin.x + col * COL,
+      y: o.y ?? origin.y + d * ROW
+    };
+  });
 }
 
 // src/object-index.ts
-import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync2 } from "fs";
+import { existsSync, readdirSync, readFileSync as readFileSync2 } from "fs";
 import { join } from "path";
 function decodeEntities(s) {
   return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
@@ -28483,7 +28509,7 @@ function parseRefpage(xml) {
 }
 function buildIndex(refpagesRoot) {
   const out = [];
-  if (!existsSync2(refpagesRoot))
+  if (!existsSync(refpagesRoot))
     return out;
   for (const dir of readdirSync(refpagesRoot, { withFileTypes: true })) {
     if (!dir.isDirectory())
@@ -28554,6 +28580,63 @@ function parseObjectText(text) {
   return { classname: classname ?? "", args };
 }
 
+// src/patch-checks.ts
+function className(b) {
+  if (b.maxclass === "newobj" || b.maxclass === "jbogus") {
+    return b.text.trim().split(/\s+/)[0] ?? b.maxclass;
+  }
+  return b.maxclass;
+}
+var isSignal = (b) => className(b).endsWith("~");
+var BREAKS_LOOP = new Set(["tapin~", "tapout~", "delwrite~", "delread~"]);
+function signalCycles(ctx) {
+  const adj = new Map;
+  for (const l of ctx.lines) {
+    const a = ctx.boxes[l.src[0]];
+    const b = ctx.boxes[l.dst[0]];
+    if (!a || !b || !isSignal(a) || !isSignal(b))
+      continue;
+    if (BREAKS_LOOP.has(className(a)) || BREAKS_LOOP.has(className(b)))
+      continue;
+    adj.set(l.src[0], [...adj.get(l.src[0]) ?? [], l.dst[0]]);
+  }
+  const cycles = [];
+  const state = new Map;
+  const stack = [];
+  const visit = (n) => {
+    state.set(n, 1);
+    stack.push(n);
+    for (const m of adj.get(n) ?? []) {
+      if (state.get(m) === 1)
+        cycles.push(stack.slice(stack.indexOf(m)));
+      else if (!state.has(m))
+        visit(m);
+    }
+    stack.pop();
+    state.set(n, 2);
+  };
+  for (const n of adj.keys())
+    if (!state.has(n))
+      visit(n);
+  return cycles;
+}
+function checkPatch(ctx) {
+  const warnings = [];
+  const label = (i) => {
+    const b = ctx.boxes[i];
+    return b ? `${b.id} [${b.text || b.maxclass}]` : `#${i}`;
+  };
+  for (const cycle of signalCycles(ctx)) {
+    warnings.push(`Signal feedback loop without a delay: ${[...cycle, cycle[0] ?? 0].map(label).join(" \u2192 ")}. Max will refuse to run it ("infinite recursion"). Remove a patchcord or put tapin~/tapout~ in the loop.`);
+  }
+  ctx.boxes.forEach((b, i) => {
+    if (b.maxclass === "jbogus") {
+      warnings.push(`${label(i)} is not a valid Max object (shown with a dashed border). Find the right name with search_objects.`);
+    }
+  });
+  return warnings;
+}
+
 // src/types/max.ts
 function convertMaxpat(raw) {
   const idToIndex = new Map;
@@ -28586,9 +28669,7 @@ function convertMaxpat(raw) {
 
 // src/mcp-server.ts
 var PROJECT_ROOT = join2(dirname(fileURLToPath(import.meta.url)), "..");
-var CONTEXT_FILE = join2(PROJECT_ROOT, "patch-context.json");
-var COMMANDS_FILE = join2(PROJECT_ROOT, "commands.ndjson");
-var RESULTS_FILE = join2(PROJECT_ROOT, "command-results.ndjson");
+var BRIDGE_INFO = join2(PROJECT_ROOT, ".bridge.json");
 var MAX_REFPAGES = "/Applications/Max.app/Contents/Resources/C74/docs/refpages";
 var MAX_APP_HELP = "/Applications/Max.app/Contents/Resources/C74/help";
 var MAX_USER_ROOTS = [
@@ -28598,89 +28679,87 @@ var MAX_USER_ROOTS = [
 ];
 function findHelpPatch(maxclass) {
   const filename = `${maxclass}.maxhelp`;
-  if (existsSync3(MAX_APP_HELP)) {
+  if (existsSync2(MAX_APP_HELP)) {
     try {
       const flat = join2(MAX_APP_HELP, filename);
-      if (existsSync3(flat))
+      if (existsSync2(flat))
         return flat;
       for (const entry of readdirSync2(MAX_APP_HELP, { withFileTypes: true })) {
         if (!entry.isDirectory())
           continue;
         const p = join2(MAX_APP_HELP, entry.name, filename);
-        if (existsSync3(p))
+        if (existsSync2(p))
           return p;
       }
     } catch {}
   }
   for (const root of MAX_USER_ROOTS) {
-    if (!existsSync3(root))
+    if (!existsSync2(root))
       continue;
     try {
       for (const entry of readdirSync2(root, { withFileTypes: true })) {
         if (!entry.isDirectory())
           continue;
         const p = join2(root, entry.name, "help", filename);
-        if (existsSync3(p))
+        if (existsSync2(p))
           return p;
       }
     } catch {}
   }
   return null;
 }
-function loadContext() {
-  try {
-    const raw = readFileSync3(CONTEXT_FILE, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return { boxes: [], lines: [] };
-  }
-}
-var server = new McpServer({
-  name: "max-msp",
-  version: "1.0.0"
-});
-server.tool("get_patch_context", "Get the full Max MSP patch context: all objects (boxes) and connections (lines). Use first to understand the overall structure.", {}, async () => {
-  const ctx = loadContext();
-  return {
-    content: [{ type: "text", text: JSON.stringify(ctx, null, 2) }]
-  };
-});
-server.tool("get_object_connections", "Get all inputs and outputs for a single object, identified by its id from get_patch_context.", {
-  id: exports_external.string().describe("Object varname/id from get_patch_context")
-}, async ({ id }) => {
-  const ctx = loadContext();
-  const objIndex = ctx.boxes.findIndex((b) => b.id === id);
-  if (objIndex === -1) {
-    return {
-      content: [{ type: "text", text: `Object "${id}" not found` }]
-    };
-  }
-  const obj = ctx.boxes[objIndex];
-  if (!obj) {
-    return { content: [{ type: "text", text: `Object "${id}" not found` }] };
-  }
-  const inputs = ctx.lines.filter((l) => l.dst[0] === objIndex).map((l) => ({
-    fromObject: ctx.boxes[l.src[0]]?.id,
-    fromOutlet: l.src[1],
-    toInlet: l.dst[1]
-  }));
-  const outputs = ctx.lines.filter((l) => l.src[0] === objIndex).map((l) => ({
-    toObject: ctx.boxes[l.dst[0]]?.id,
-    fromOutlet: l.src[1],
-    toInlet: l.dst[1]
-  }));
+var INSTRUCTIONS = [
+  "Tools for building and inspecting Max/MSP patches in a running Max instance.",
+  "Workflow: get_patch_context first (it tells you which patch window you are editing, field `patch`).",
+  "If you don't know an object's name, use search_objects; then confirm inlets/outlets, modes, attributes and arguments with get_object_docs (and get_object_help for a working example). Never guess numeric modes or attribute names.",
+  "Prefer create_patch_fragment to build several objects and their patchcords in one call; omit x/y to get an automatic top-to-bottom layout below existing objects.",
+  "Object ids: use the ids returned by tools (varnames or stable obj-<n> ids). Inlets/outlets are 0-indexed from the left.",
+  "Read the `warnings` in every result (signal feedback loops, invalid objects) and fix them before reporting success. You cannot hear the patch: tell the user how to test it (e.g. turn on ezdac~).",
+  "Max conventions: signal objects end with ~; *~ / +~ need a signal in the left inlet; ezdac~/dac~ inlets are left/right channels."
+].join(`
+`);
+var server = new McpServer({ name: "max-msp", version: "2.0.0" }, { instructions: INSTRUCTIONS });
+function text(value) {
   return {
     content: [
       {
         type: "text",
-        text: JSON.stringify({
-          object: { id: obj.id, type: obj.maxclass, text: obj.text },
-          inputs,
-          outputs
-        }, null, 2)
+        text: typeof value === "string" ? value : JSON.stringify(value, null, 2)
       }
     ]
   };
+}
+async function liveContext() {
+  const r = await callBridge(BRIDGE_INFO, "get_context");
+  if (!r.ok)
+    return { error: r.error };
+  return { ctx: r.context, note: r.note };
+}
+async function mutate(type, params) {
+  const { context, ...result } = await callBridge(BRIDGE_INFO, type, params);
+  const warnings = context ? checkPatch(context) : [];
+  return text(warnings.length ? { ...result, warnings } : result);
+}
+server.tool("get_patch_context", "Get the live Max patch being edited: `patch` (window title), all objects (boxes: id, maxclass, text, rect, numinlets, numoutlets) and connections (lines: [boxIndex, port] pairs). Includes `warnings` about broken objects or signal loops. Call this first.", {}, async () => {
+  const { ctx, error: error48, note } = await liveContext();
+  if (!ctx)
+    return text({ ok: false, error: error48 });
+  const warnings = checkPatch(ctx);
+  return text({ ...ctx, ...note ? { note } : {}, ...warnings.length ? { warnings } : {} });
+});
+server.tool("get_object_connections", "Get all inputs and outputs for a single object, identified by its id from get_patch_context.", {
+  id: exports_external.string().describe("Object id from get_patch_context")
+}, async ({ id }) => {
+  const { ctx, error: error48 } = await liveContext();
+  if (!ctx)
+    return text({ ok: false, error: error48 });
+  const idx = ctx.boxes.findIndex((b) => b.id === id);
+  const obj = ctx.boxes[idx];
+  if (!obj)
+    return text(`Object "${id}" not found`);
+  const inputs = ctx.lines.filter((l) => l.dst[0] === idx).map((l) => ({ fromObject: ctx.boxes[l.src[0]]?.id, fromOutlet: l.src[1], toInlet: l.dst[1] }));
+  const outputs = ctx.lines.filter((l) => l.src[0] === idx).map((l) => ({ toObject: ctx.boxes[l.dst[0]]?.id, fromOutlet: l.src[1], toInlet: l.dst[1] }));
+  return text({ object: { id: obj.id, type: obj.maxclass, text: obj.text }, inputs, outputs });
 });
 var objectIndex = null;
 server.tool("search_objects", "Search ALL Max/MSP/Jitter objects by what they do. Use this when you don't know the exact object name (e.g. 'delay line', 'random number', 'midi note in', 'lowpass filter'). Returns name, category, short description and related objects. Then use get_object_docs / get_object_help on the best candidates.", {
@@ -28715,7 +28794,7 @@ server.tool("get_object_docs", "Get Max MSP reference documentation for an objec
   let xml = null;
   for (const dir of dirs) {
     const p = join2(MAX_REFPAGES, dir, `${maxclass}.maxref.xml`);
-    if (existsSync3(p)) {
+    if (existsSync2(p)) {
       xml = readFileSync3(p, "utf-8");
       break;
     }
@@ -28731,50 +28810,48 @@ server.tool("get_object_docs", "Get Max MSP reference documentation for an objec
     content: [{ type: "text", text: xml }]
   };
 });
-server.tool("create_object", "Create a new Max object in the patch. `text` is the full Box.text (e.g. 'cycle~ 440', 'button', 'message foo bar'). `x`/`y` are absolute pixels. Optionally pass `varname` to give the new object a specific name; otherwise an auto-generated `mcp_<n>` name is assigned. After this call, the next get_patch_context reflects the new object.", {
-  text: exports_external.string().describe("Full text as in Box.text, e.g. 'cycle~ 440'"),
-  x: exports_external.number().describe("X coordinate in pixels (top-left corner)"),
-  y: exports_external.number().describe("Y coordinate in pixels (top-left corner)"),
-  varname: exports_external.string().optional().describe("Optional varname for the new object. Must be unique in the patch.")
-}, async ({ text, x, y, varname }) => {
-  const { classname, args } = parseObjectText(text);
-  if (!classname) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ ok: false, error: "empty text" })
-        }
-      ]
-    };
-  }
-  const result = await sendCommand(COMMANDS_FILE, RESULTS_FILE, "create_object", { classname, args, x, y, varname, text });
-  const { requestId: _id, ...payload } = result;
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload) }]
-  };
+server.tool("create_object", "Create one Max object. `text` is the full box text (e.g. 'cycle~ 440', 'button', 'message foo bar'). Returns its id. For several objects use create_patch_fragment.", {
+  text: exports_external.string().describe("Full box text, e.g. 'cycle~ 440'"),
+  x: exports_external.number().describe("X in pixels (top-left)"),
+  y: exports_external.number().describe("Y in pixels (top-left)"),
+  varname: exports_external.string().optional().describe("Optional unique name, becomes the object's id")
+}, async ({ text: boxText, x, y, varname }) => {
+  const { classname, args } = parseObjectText(boxText);
+  if (!classname)
+    return text({ ok: false, error: "empty text" });
+  return mutate("create_object", { classname, args, x, y, varname });
 });
-server.tool("connect_objects", "Connect two existing Max objects with a patchcord. Both ids come from get_patch_context. Outlets/inlets are 0-indexed (0 = leftmost). After this call, the next get_patch_context reflects the new connection.", {
-  srcId: exports_external.string().describe("Source object id from get_patch_context"),
-  srcOutlet: exports_external.number().int().nonnegative().describe("Source outlet, 0-indexed (0 = leftmost)"),
-  dstId: exports_external.string().describe("Destination object id from get_patch_context"),
-  dstInlet: exports_external.number().int().nonnegative().describe("Destination inlet, 0-indexed (0 = leftmost)")
-}, async ({ srcId, srcOutlet, dstId, dstInlet }) => {
-  const result = await sendCommand(COMMANDS_FILE, RESULTS_FILE, "connect_objects", { srcId, srcOutlet, dstId, dstInlet });
-  const { requestId: _id, ...payload } = result;
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload) }]
-  };
+server.tool("create_patch_fragment", "Create several objects and patchcords in ONE call. Give each object a short local `name` (used in `connections` and as its id). Connections may also reference existing object ids. Omit x/y for automatic layout (top-to-bottom by signal flow, below existing objects). Returns created ids, errors and patch warnings.", {
+  objects: exports_external.array(exports_external.object({
+    name: exports_external.string().describe("Local name, e.g. 'osc' \u2014 becomes the object's id"),
+    text: exports_external.string().describe("Full box text, e.g. 'cycle~ 440'"),
+    x: exports_external.number().optional(),
+    y: exports_external.number().optional()
+  })).min(1),
+  connections: exports_external.array(exports_external.object({
+    from: exports_external.string().describe("Local name or existing id"),
+    outlet: exports_external.number().int().nonnegative(),
+    to: exports_external.string().describe("Local name or existing id"),
+    inlet: exports_external.number().int().nonnegative()
+  })).default([])
+}, async ({ objects, connections }) => {
+  const { ctx } = await liveContext();
+  const origin = originBelow(ctx ?? { boxes: [], lines: [] });
+  const placed = layout(objects, connections, origin).map((o) => ({
+    name: o.name,
+    x: o.x,
+    y: o.y,
+    ...parseObjectText(o.text)
+  }));
+  return mutate("create_fragment", { objects: placed, connections });
 });
-server.tool("delete_object", "Delete an existing Max object from the patch by id (from get_patch_context). Removes the object and any patchcords attached to it. After this call, the next get_patch_context reflects the deletion.", {
-  id: exports_external.string().describe("Object id/varname from get_patch_context")
-}, async ({ id }) => {
-  const result = await sendCommand(COMMANDS_FILE, RESULTS_FILE, "delete_object", { id });
-  const { requestId: _id, ...payload } = result;
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload) }]
-  };
-});
+server.tool("connect_objects", "Connect two existing objects with a patchcord. Ids from get_patch_context; outlets/inlets 0-indexed from the left.", {
+  srcId: exports_external.string(),
+  srcOutlet: exports_external.number().int().nonnegative(),
+  dstId: exports_external.string(),
+  dstInlet: exports_external.number().int().nonnegative()
+}, async (params) => mutate("connect_objects", params));
+server.tool("delete_object", "Delete an object (and its patchcords) by id from get_patch_context.", { id: exports_external.string() }, async (params) => mutate("delete_object", params));
 server.tool("get_object_help", "Get the help patch (.maxhelp) for a Max MSP object: a working example patch showing how the object is used. Returns normalized { boxes, lines } in the same shape as get_patch_context, plus the source path. Use after get_object_docs when you want a concrete usage example.", {
   maxclass: exports_external.string().describe("Object type, e.g. 'cycle~', 'button', 'route'")
 }, async ({ maxclass }) => {

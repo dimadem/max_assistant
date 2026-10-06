@@ -5,9 +5,11 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { sendCommand } from "./command-channel.ts";
+import { callBridge } from "./bridge-client.ts";
+import { layout, originBelow } from "./layout.ts";
 import { buildIndex, type ObjectEntry, searchIndex } from "./object-index.ts";
 import { parseObjectText } from "./parse-object-text.ts";
+import { checkPatch } from "./patch-checks.ts";
 import {
 	convertMaxpat,
 	type PatchContext,
@@ -15,9 +17,7 @@ import {
 } from "./types/max.ts";
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CONTEXT_FILE = join(PROJECT_ROOT, "patch-context.json");
-const COMMANDS_FILE = join(PROJECT_ROOT, "commands.ndjson");
-const RESULTS_FILE = join(PROJECT_ROOT, "command-results.ndjson");
+const BRIDGE_INFO = join(PROJECT_ROOT, ".bridge.json");
 
 const MAX_REFPAGES =
 	"/Applications/Max.app/Contents/Resources/C74/docs/refpages";
@@ -58,80 +58,78 @@ function findHelpPatch(maxclass: string): string | null {
 	return null;
 }
 
-function loadContext(): PatchContext {
-	try {
-		const raw = readFileSync(CONTEXT_FILE, "utf-8");
-		return JSON.parse(raw);
-	} catch {
-		return { boxes: [], lines: [] };
-	}
+const INSTRUCTIONS = [
+	"Tools for building and inspecting Max/MSP patches in a running Max instance.",
+	"Workflow: get_patch_context first (it tells you which patch window you are editing, field `patch`).",
+	"If you don't know an object's name, use search_objects; then confirm inlets/outlets, modes, attributes and arguments with get_object_docs (and get_object_help for a working example). Never guess numeric modes or attribute names.",
+	"Prefer create_patch_fragment to build several objects and their patchcords in one call; omit x/y to get an automatic top-to-bottom layout below existing objects.",
+	"Object ids: use the ids returned by tools (varnames or stable obj-<n> ids). Inlets/outlets are 0-indexed from the left.",
+	"Read the `warnings` in every result (signal feedback loops, invalid objects) and fix them before reporting success. You cannot hear the patch: tell the user how to test it (e.g. turn on ezdac~).",
+	"Max conventions: signal objects end with ~; *~ / +~ need a signal in the left inlet; ezdac~/dac~ inlets are left/right channels.",
+].join("\n");
+
+const server = new McpServer(
+	{ name: "max-msp", version: "2.0.0" },
+	{ instructions: INSTRUCTIONS },
+);
+
+type Ctx = PatchContext;
+
+function text(value: unknown) {
+	return {
+		content: [
+			{
+				type: "text" as const,
+				text: typeof value === "string" ? value : JSON.stringify(value, null, 2),
+			},
+		],
+	};
 }
 
-const server = new McpServer({
-	name: "max-msp",
-	version: "1.0.0",
-});
+async function liveContext(): Promise<{ ctx?: Ctx; error?: string; note?: string }> {
+	const r = await callBridge(BRIDGE_INFO, "get_context");
+	if (!r.ok) return { error: r.error };
+	return { ctx: r.context as Ctx, note: r.note as string | undefined };
+}
+
+// Run a mutating bridge command and return its result + patch warnings,
+// without dumping the whole context back to the model.
+async function mutate(type: string, params: Record<string, unknown>) {
+	const { context, ...result } = await callBridge(BRIDGE_INFO, type, params);
+	const warnings = context ? checkPatch(context as Ctx) : [];
+	return text(warnings.length ? { ...result, warnings } : result);
+}
 
 server.tool(
 	"get_patch_context",
-	"Get the full Max MSP patch context: all objects (boxes) and connections (lines). Use first to understand the overall structure.",
+	"Get the live Max patch being edited: `patch` (window title), all objects (boxes: id, maxclass, text, rect, numinlets, numoutlets) and connections (lines: [boxIndex, port] pairs). Includes `warnings` about broken objects or signal loops. Call this first.",
 	{},
 	async () => {
-		const ctx = loadContext();
-		return {
-			content: [{ type: "text", text: JSON.stringify(ctx, null, 2) }],
-		};
+		const { ctx, error, note } = await liveContext();
+		if (!ctx) return text({ ok: false, error });
+		const warnings = checkPatch(ctx);
+		return text({ ...ctx, ...(note ? { note } : {}), ...(warnings.length ? { warnings } : {}) });
 	},
 );
-
 server.tool(
 	"get_object_connections",
 	"Get all inputs and outputs for a single object, identified by its id from get_patch_context.",
 	{
-		id: z.string().describe("Object varname/id from get_patch_context"),
+		id: z.string().describe("Object id from get_patch_context"),
 	},
 	async ({ id }) => {
-		const ctx = loadContext();
-		const objIndex = ctx.boxes.findIndex((b) => b.id === id);
-		if (objIndex === -1) {
-			return {
-				content: [{ type: "text", text: `Object "${id}" not found` }],
-			};
-		}
-		const obj = ctx.boxes[objIndex];
-		if (!obj) {
-			return { content: [{ type: "text", text: `Object "${id}" not found` }] };
-		}
+		const { ctx, error } = await liveContext();
+		if (!ctx) return text({ ok: false, error });
+		const idx = ctx.boxes.findIndex((b) => b.id === id);
+		const obj = ctx.boxes[idx];
+		if (!obj) return text(`Object "${id}" not found`);
 		const inputs = ctx.lines
-			.filter((l) => l.dst[0] === objIndex)
-			.map((l) => ({
-				fromObject: ctx.boxes[l.src[0]]?.id,
-				fromOutlet: l.src[1],
-				toInlet: l.dst[1],
-			}));
+			.filter((l) => l.dst[0] === idx)
+			.map((l) => ({ fromObject: ctx.boxes[l.src[0]]?.id, fromOutlet: l.src[1], toInlet: l.dst[1] }));
 		const outputs = ctx.lines
-			.filter((l) => l.src[0] === objIndex)
-			.map((l) => ({
-				toObject: ctx.boxes[l.dst[0]]?.id,
-				fromOutlet: l.src[1],
-				toInlet: l.dst[1],
-			}));
-		return {
-			content: [
-				{
-					type: "text",
-					text: JSON.stringify(
-						{
-							object: { id: obj.id, type: obj.maxclass, text: obj.text },
-							inputs,
-							outputs,
-						},
-						null,
-						2,
-					),
-				},
-			],
-		};
+			.filter((l) => l.src[0] === idx)
+			.map((l) => ({ toObject: ctx.boxes[l.dst[0]]?.id, fromOutlet: l.src[1], toInlet: l.dst[1] }));
+		return text({ object: { id: obj.id, type: obj.maxclass, text: obj.text }, inputs, outputs });
 	},
 );
 
@@ -201,92 +199,75 @@ server.tool(
 
 server.tool(
 	"create_object",
-	"Create a new Max object in the patch. `text` is the full Box.text (e.g. 'cycle~ 440', 'button', 'message foo bar'). `x`/`y` are absolute pixels. Optionally pass `varname` to give the new object a specific name; otherwise an auto-generated `mcp_<n>` name is assigned. After this call, the next get_patch_context reflects the new object.",
+	"Create one Max object. `text` is the full box text (e.g. 'cycle~ 440', 'button', 'message foo bar'). Returns its id. For several objects use create_patch_fragment.",
 	{
-		text: z.string().describe("Full text as in Box.text, e.g. 'cycle~ 440'"),
-		x: z.number().describe("X coordinate in pixels (top-left corner)"),
-		y: z.number().describe("Y coordinate in pixels (top-left corner)"),
-		varname: z
-			.string()
-			.optional()
-			.describe(
-				"Optional varname for the new object. Must be unique in the patch.",
-			),
+		text: z.string().describe("Full box text, e.g. 'cycle~ 440'"),
+		x: z.number().describe("X in pixels (top-left)"),
+		y: z.number().describe("Y in pixels (top-left)"),
+		varname: z.string().optional().describe("Optional unique name, becomes the object's id"),
 	},
-	async ({ text, x, y, varname }) => {
-		const { classname, args } = parseObjectText(text);
-		if (!classname) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: JSON.stringify({ ok: false, error: "empty text" }),
-					},
-				],
-			};
-		}
-		const result = await sendCommand(
-			COMMANDS_FILE,
-			RESULTS_FILE,
-			"create_object",
-			{ classname, args, x, y, varname, text },
-		);
-		const { requestId: _id, ...payload } = result;
-		return {
-			content: [{ type: "text", text: JSON.stringify(payload) }],
-		};
+	async ({ text: boxText, x, y, varname }) => {
+		const { classname, args } = parseObjectText(boxText);
+		if (!classname) return text({ ok: false, error: "empty text" });
+		return mutate("create_object", { classname, args, x, y, varname });
+	},
+);
+
+server.tool(
+	"create_patch_fragment",
+	"Create several objects and patchcords in ONE call. Give each object a short local `name` (used in `connections` and as its id). Connections may also reference existing object ids. Omit x/y for automatic layout (top-to-bottom by signal flow, below existing objects). Returns created ids, errors and patch warnings.",
+	{
+		objects: z
+			.array(
+				z.object({
+					name: z.string().describe("Local name, e.g. 'osc' — becomes the object's id"),
+					text: z.string().describe("Full box text, e.g. 'cycle~ 440'"),
+					x: z.number().optional(),
+					y: z.number().optional(),
+				}),
+			)
+			.min(1),
+		connections: z
+			.array(
+				z.object({
+					from: z.string().describe("Local name or existing id"),
+					outlet: z.number().int().nonnegative(),
+					to: z.string().describe("Local name or existing id"),
+					inlet: z.number().int().nonnegative(),
+				}),
+			)
+			.default([]),
+	},
+	async ({ objects, connections }) => {
+		const { ctx } = await liveContext();
+		const origin = originBelow(ctx ?? { boxes: [], lines: [] });
+		const placed = layout(objects, connections, origin).map((o) => ({
+			name: o.name,
+			x: o.x,
+			y: o.y,
+			...parseObjectText(o.text),
+		}));
+		return mutate("create_fragment", { objects: placed, connections });
 	},
 );
 
 server.tool(
 	"connect_objects",
-	"Connect two existing Max objects with a patchcord. Both ids come from get_patch_context. Outlets/inlets are 0-indexed (0 = leftmost). After this call, the next get_patch_context reflects the new connection.",
+	"Connect two existing objects with a patchcord. Ids from get_patch_context; outlets/inlets 0-indexed from the left.",
 	{
-		srcId: z.string().describe("Source object id from get_patch_context"),
-		srcOutlet: z
-			.number()
-			.int()
-			.nonnegative()
-			.describe("Source outlet, 0-indexed (0 = leftmost)"),
-		dstId: z.string().describe("Destination object id from get_patch_context"),
-		dstInlet: z
-			.number()
-			.int()
-			.nonnegative()
-			.describe("Destination inlet, 0-indexed (0 = leftmost)"),
+		srcId: z.string(),
+		srcOutlet: z.number().int().nonnegative(),
+		dstId: z.string(),
+		dstInlet: z.number().int().nonnegative(),
 	},
-	async ({ srcId, srcOutlet, dstId, dstInlet }) => {
-		const result = await sendCommand(
-			COMMANDS_FILE,
-			RESULTS_FILE,
-			"connect_objects",
-			{ srcId, srcOutlet, dstId, dstInlet },
-		);
-		const { requestId: _id, ...payload } = result;
-		return {
-			content: [{ type: "text", text: JSON.stringify(payload) }],
-		};
-	},
+	async (params) => mutate("connect_objects", params),
 );
 
 server.tool(
 	"delete_object",
-	"Delete an existing Max object from the patch by id (from get_patch_context). Removes the object and any patchcords attached to it. After this call, the next get_patch_context reflects the deletion.",
-	{
-		id: z.string().describe("Object id/varname from get_patch_context"),
-	},
-	async ({ id }) => {
-		const result = await sendCommand(
-			COMMANDS_FILE,
-			RESULTS_FILE,
-			"delete_object",
-			{ id },
-		);
-		const { requestId: _id, ...payload } = result;
-		return {
-			content: [{ type: "text", text: JSON.stringify(payload) }],
-		};
-	},
+	"Delete an object (and its patchcords) by id from get_patch_context.",
+	{ id: z.string() },
+	async (params) => mutate("delete_object", params),
 );
 
 server.tool(

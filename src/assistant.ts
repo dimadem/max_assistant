@@ -1,49 +1,33 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Max from "max-api";
-import { writeContext } from "./patch-context.ts";
+import { createBridgeServer } from "./bridge-server.ts";
 import { encodeText, UI_IN, type UIInSelector } from "./types/protocol.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 // In dev: scriptDir = .../src — go up. After build: scriptDir = .../code — go up.
 const PROJECT_ROOT = join(scriptDir, "..");
-const contextFile = join(PROJECT_ROOT, "patch-context.json");
-const COMMANDS_FILE = join(PROJECT_ROOT, "commands.ndjson");
-const RESULTS_FILE = join(PROJECT_ROOT, "command-results.ndjson");
+const BRIDGE_INFO = join(PROJECT_ROOT, ".bridge.json");
 const MCP_CONFIG = join(PROJECT_ROOT, ".mcp.json");
 const UI_URL = `file://${join(PROJECT_ROOT, "ui", "index.html")}`;
 
-// Queue instead of a single global — fixes race condition when user sends
-// multiple messages before the first context response arrives.
-const pendingPrompts: string[] = [];
+// One claude run at a time; it resumes the same session.
+let running = false;
 
 // Continues the same Claude session across prompts so the agent remembers
 // prior messages. Reset by the "clear" handler.
 let currentSessionId: string | null = null;
 
+// Tool usage rules live in the MCP server's `instructions` so every client
+// (this chat, Claude Desktop, Claude Code) gets them. Only chat-specific
+// context here.
 const SYSTEM_PROMPT = [
-	"You are an expert Max/MSP assistant embedded inside a live Max patch.",
-	"Use the provided MCP tools to inspect and modify the current patch:",
-	"  • get_patch_context       — full list of objects and connections",
-	"  • get_object_connections  — inputs/outputs for a specific object by id",
-	"  • search_objects          — find objects by what they do when you don't know the name (search first, then read docs)",
-	"  • get_object_docs         — Max reference docs (inlets, outlets, messages, attributes) for any object type",
-	"  • get_object_help         — working example patch (.maxhelp) for an object type",
-	"  • create_object           — create a new Max object at (x,y) with full Box.text",
-	"  • connect_objects         — connect srcId.outlet → dstId.inlet (ids from get_patch_context)",
-	"  • delete_object           — delete an existing object by id (also removes its patchcords)",
-	"You edit the user's WORK patch (its window title is in get_patch_context → patch), never the assistant's own patch.",
-	"Never guess object modes, attribute names or argument meanings — confirm them with get_object_docs before using them.",
-	"Max/MSP conventions to keep in mind:",
-	"  • Signal objects end with ~ (cycle~, dac~, selector~, etc.)",
-	"  • Data flows left-to-right through inlets/outlets",
-	"  • 'maxclass' is the object type; 'text' is the full typed argument string",
-	"  • Connections are indexed: outlet 0 is leftmost, inlet 0 is leftmost",
-	"After any mutation tool, the patch-context is refreshed automatically; call get_patch_context again only if you need updated ids.",
-	"Be concise. When referencing objects use their text or id.",
+	"You are a Max/MSP assistant embedded in a chat panel inside Max.",
+	"The user is looking at their patch; build and edit it with the max-msp MCP tools.",
+	"Answer in the user's language. Be concise.",
 ].join(" ");
 
 // Build PATH that includes common Mac install locations for claude and bun.
@@ -190,6 +174,7 @@ function spawnClaude(prompt: string): void {
 	child.on("close", (code: number | null) => {
 		clearTimeout(timeout);
 		setBusy(false);
+		running = false;
 		if (code !== 0) {
 			const msg = `Claude exited with code ${code}`;
 			Max.post(msg);
@@ -201,6 +186,7 @@ function spawnClaude(prompt: string): void {
 
 	child.on("error", (err: Error) => {
 		setBusy(false);
+		running = false;
 		const msg = `Failed to start claude: ${err.message}`;
 		Max.post(msg);
 		sendText(UI_IN.appendError, msg);
@@ -213,88 +199,43 @@ function joinArgs(args: unknown[]): string {
 	return args.map(String).join(" ");
 }
 
-interface CommandSyncedPayload {
-	requestId: string;
-	context: unknown;
-	result: Record<string, unknown>;
-}
+const bridge = createBridgeServer((json) => Max.outlet("bridge", "command", json));
 
 Max.addHandlers({
 	prompt: (...args: unknown[]) => {
 		const text = joinArgs(args).trim();
 		if (!text) return;
-		pendingPrompts.push(text);
+		if (running) {
+			setStatus("busy — wait for the current answer");
+			return;
+		}
+		running = true;
 		setBusy(true);
-		setStatus("getting patch context…");
-		Max.outlet("bridge", "getcontext");
+		setStatus("running claude…");
+		spawnClaude(text);
 	},
 	clear: () => {
 		currentSessionId = null;
-		pendingPrompts.length = 0;
-		Max.outlet("bridge", "reset"); // next prompt re-picks the target patch
+		Max.outlet("bridge", "reset"); // next command re-picks the target patch
 		Max.outlet(UI_IN.clearChat);
 		setStatus("ready");
-		setBusy(false);
 		Max.post("Session cleared");
 	},
-	bridgeResponse: (type: string, ...data: unknown[]) => {
-		if (type !== "context") return;
-		const prompt = pendingPrompts.shift();
-		if (!prompt) return;
-		try {
-			const ctx = writeContext(joinArgs(data), contextFile);
-			setStatus(
-				`running claude · ${ctx.patch ?? "patch"} · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`,
-			);
-			spawnClaude(prompt);
-		} catch (e) {
-			const msg = `Error: ${e}`;
-			Max.post(msg);
-			sendText(UI_IN.appendError, msg);
-			setBusy(false);
-			setStatus("ready");
-		}
-	},
-	commandSynced: (...args: unknown[]) => {
-		const json = joinArgs(args);
-		let payload: CommandSyncedPayload;
-		try {
-			payload = JSON.parse(json) as CommandSyncedPayload;
-		} catch (e) {
-			Max.post(`commandSynced parse error: ${e}; raw=${json}`);
-			return;
-		}
-		const { requestId, context, result } = payload;
-		if (context) {
-			try {
-				writeContext(JSON.stringify(context), contextFile);
-			} catch (e) {
-				Max.post(`context write failed after command ${requestId}: ${e}`);
-			}
-		}
-		try {
-			appendFileSync(
-				RESULTS_FILE,
-				`${JSON.stringify({ requestId, ...result })}\n`,
-			);
-		} catch (e) {
-			Max.post(`failed to append command-results.ndjson: ${e}`);
-		}
-	},
+	bridgeResult: (...args: unknown[]) => bridge.handleResult(joinArgs(args)),
 });
 
-// Truncate channel files at startup so stale entries from previous sessions
-// don't pollute polling. Both files are append-only during a session.
 try {
-	writeFileSync(COMMANDS_FILE, "");
-	writeFileSync(RESULTS_FILE, "");
+	const info = await bridge.listen();
+	writeFileSync(BRIDGE_INFO, JSON.stringify(info));
+	Max.post(`Bridge listening on 127.0.0.1:${info.port}`);
 } catch (e) {
-	Max.post(`could not init command channel files: ${e}`);
+	Max.post(`Bridge failed to start: ${e}`);
 }
-
-// Tell [v8] where the project root is so it can locate commands.ndjson and
-// start its command poller. Sent before the first prompt.
-Max.outlet("bridge", "config", PROJECT_ROOT);
+process.on("exit", () => {
+	try {
+		unlinkSync(BRIDGE_INFO);
+	} catch {}
+});
 
 // Tell [jweb] which page to load. Doing it from here (instead of hardcoding
 // @url in the .maxpat) keeps the project portable — the path is computed
