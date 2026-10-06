@@ -19,7 +19,7 @@ inlets = 1;
 outlets = 1;
 const jsthis = this; // the [v8] object; `this` is not reliable inside callbacks
 
-const VERSION = "v12";
+const VERSION = "v13";
 post(`bridge.js ${VERSION} loaded\n`);
 
 // ---------- helpers ---------------------------------------------------------
@@ -77,14 +77,14 @@ let lastFocused = null; // last patcher window the user was in (not the assistan
 
 // max.frontpatcher is null while commands arrive (e.g. while Claude Desktop
 // or the chat's jweb has focus), so remember the user's patch as they work.
-// One property read every 500 ms — no file I/O.
+// One property read every 150 ms — no file I/O.
 const focusTracker = new Task(() => {
 	try {
 		const fp = max.frontpatcher;
 		if (fp && !samePatcher(topLevel(fp), ownTop())) lastFocused = topLevel(fp);
 	} catch (_) {}
 });
-focusTracker.interval = 500;
+focusTracker.interval = 150;
 focusTracker.repeat();
 
 function ownTop() {
