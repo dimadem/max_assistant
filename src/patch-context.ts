@@ -11,7 +11,7 @@ export function parseContext(json: string): PatchContext {
 	if (!Array.isArray(ctx.boxes) || !Array.isArray(ctx.lines)) {
 		throw new Error("bridge sent malformed context (missing boxes/lines)");
 	}
-	return { boxes: ctx.boxes, lines: ctx.lines };
+	return { patch: ctx.patch, boxes: ctx.boxes, lines: ctx.lines };
 }
 
 export function writeContext(json: string, contextPath: string): PatchContext {

@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 
 const POLL_INTERVAL_MS = 50;
-const DEFAULT_TIMEOUT_MS = 2000;
+const DEFAULT_TIMEOUT_MS = 5000;
 
 interface CommandResult {
 	requestId: string;

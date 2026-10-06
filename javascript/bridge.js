@@ -11,10 +11,11 @@
  */
 
 autowatch = 1;
+const jsthis = this;
 inlets = 1;
 outlets = 1;
 
-post("bridge.js v6 loaded\n");
+post("bridge.js v9 loaded\n");
 
 // ---------- shared helpers ----------------------------------------------
 
@@ -24,11 +25,115 @@ function topLevel(p) {
 	return cur;
 }
 
+// ---------- target patcher -----------------------------------------------
+//
+// Embedded mode: the assistant lives inside the user's patch (bpatcher /
+//   abstraction) → work in that top-level patch, but hide the box that
+//   hosts the assistant.
+// Standalone mode: the assistant is its own window (assistant.maxpat) →
+//   work in the most recently focused OTHER patcher window; if there is none,
+//   open a new one. The choice is made on each prompt (getcontext) and kept
+//   for all commands of that prompt.
+
+let currentTarget = null;
+let createdTarget = null; // window we opened ourselves; reused until `reset`
+
+function ownTop(self) {
+	return topLevel(self.patcher);
+}
+
+// The box in the top-level patcher that contains the assistant (embedded
+// mode), or null when the assistant is the top-level patcher itself.
+function hostBox(self) {
+	let p = self.patcher;
+	let box = null;
+	while (p.parentpatcher) {
+		box = p.box;
+		p = p.parentpatcher;
+	}
+	return box;
+}
+
+function samePatcher(a, b) {
+	if (!a || !b) return false;
+	if (a === b) return true;
+	try {
+		return a.wind.title === b.wind.title && a.filepath === b.filepath;
+	} catch (_) {
+		return false;
+	}
+}
+
+function isAlive(p) {
+	try {
+		return !!p && p.wind.visible !== undefined;
+	} catch (_) {
+		return false;
+	}
+}
+
+function isStandalone(self) {
+	const own = ownTop(self);
+	return !hostBox(self) && /^assistant(\.maxpat)?$/.test(own.name || "");
+}
+
+function pickTarget(self) {
+	const own = ownTop(self);
+	if (!isStandalone(self)) return own;
+
+	let w = max.frontpatcher ? max.frontpatcher.wind : null;
+	let guard = 0;
+	while (w && guard++ < 200) {
+		const p = w.assoc;
+		if (p && !samePatcher(p, own) && w.visible) return p;
+		w = w.next;
+	}
+	if (isAlive(createdTarget)) return createdTarget;
+	createdTarget = new Patcher(80, 80, 780, 620);
+	createdTarget.wind.visible = 1;
+	createdTarget.wind.title = "assistant work";
+	post("bridge: opened new patcher for the assistant\n");
+	return createdTarget;
+}
+
+function targetFor(self) {
+	if (isAlive(currentTarget)) return currentTarget;
+	currentTarget = pickTarget(self);
+	return currentTarget;
+}
+
+function reset() {
+	currentTarget = null;
+	createdTarget = null;
+	registry = [];
+	registryOwner = null;
+	nextObjId = 1;
+}
+
 // ---------- live patch snapshot ------------------------------------------
 
-// Objects from the most recent snapshot, index-aligned with ctx.boxes, so
-// ids like "obj-3" (for objects without a varname) resolve without disk I/O.
-let lastSnapshot = [];
+// Stable ids for objects without a varname. An object keeps its `obj-<n>`
+// for as long as it lives; numbers are never reused, so deleting obj-1 can't
+// make "obj-2" suddenly point at a different object.
+let registry = []; // [{ obj, id }]
+let registryOwner = null; // patcher the registry belongs to
+let nextObjId = 1;
+
+function idFor(obj) {
+	if (obj.varname) return obj.varname;
+	for (const r of registry) if (sameObj(r.obj, obj)) {
+		r.obj = obj; // refresh wrapper (and rect, if it moved)
+		return r.id;
+	}
+	const id = `obj-${nextObjId++}`;
+	registry.push({ obj, id });
+	return id;
+}
+
+function lookupId(id) {
+	for (const r of registry) if (r.id === id) return r.obj;
+	return null;
+}
 
 function sameObj(a, b) {
 	if (!a || !b) return false;
@@ -45,13 +150,19 @@ function boxText(obj) {
 	}
 }
 
-function snapshot(target) {
+function snapshot(target, skip) {
 	const objs = [];
 	target.apply((obj) => {
-		objs.push(obj);
+		if (!sameObj(obj, skip)) objs.push(obj);
 		return true;
 	});
-	lastSnapshot = objs;
+	if (!samePatcher(registryOwner, target)) {
+		registry = [];
+		nextObjId = 1;
+		registryOwner = target;
+	}
+	// forget objects that no longer exist
+	registry = registry.filter((r) => objs.some((o) => sameObj(o, r.obj)));
 
 	const indexOf = (o) => {
 		for (let i = 0; i < objs.length; i++) if (sameObj(objs[i], o)) return i;
@@ -59,7 +170,7 @@ function snapshot(target) {
 	};
 
 	const boxes = objs.map((obj, i) => ({
-		id: obj.varname || `obj-${i + 1}`,
+		id: idFor(obj),
 		maxclass: obj.maxclass,
 		text: boxText(obj),
 		rect: obj.rect,
@@ -75,12 +186,24 @@ function snapshot(target) {
 			if (j >= 0) lines.push({ src: [i, c.srcoutlet], dst: [j, c.dstinlet] });
 		}
 	});
-	return { boxes, lines };
+	let name = "";
+	try {
+		name = target.wind.title || target.name || "";
+	} catch (_) {
+		name = target.name || "";
+	}
+	return { patch: name, boxes, lines };
 }
 
 function getcontext() {
-	const target = topLevel(this.patcher);
-	outlet(0, "bridgeResponse", "context", JSON.stringify(snapshot(target)));
+	try {
+		currentTarget = pickTarget(this); // re-pick on every prompt
+		const ctx = snapshot(currentTarget, hostBox(this));
+		outlet(0, "bridgeResponse", "context", JSON.stringify(ctx));
+	} catch (e) {
+		post(`bridge: getcontext failed: ${e}\n${e?.stack || ""}\n`);
+		outlet(0, "bridgeResponse", "context", JSON.stringify({ boxes: [], lines: [] }));
+	}
 }
 
 // ---------- command channel ---------------------------------------------
@@ -112,6 +235,7 @@ function config(root) {
 }
 
 function pollCommands() {
+	const self = this?.patcher ? this : jsthis;
 	if (!COMMANDS_PATH) return;
 	const f = new File(COMMANDS_PATH, "read");
 	if (!f.isopen) return;
@@ -136,7 +260,20 @@ function pollCommands() {
 		}
 		if (cmd?.requestId && !seenIds[cmd.requestId]) {
 			seenIds[cmd.requestId] = true;
-			executeCommand(cmd);
+			try {
+				executeCommand.call(self, cmd);
+			} catch (e) {
+				post(`bridge: ${cmd.type} failed: ${e}\n${e?.stack || ""}\n`);
+				outlet(
+					0,
+					"commandSynced",
+					JSON.stringify({
+						requestId: cmd.requestId,
+						context: null,
+						result: { ok: false, error: `bridge exception: ${e}` },
+					}),
+				);
+			}
 		}
 	}
 	commandsOffset = f.position;
@@ -146,14 +283,17 @@ function pollCommands() {
 function sendResult(requestId, target, result) {
 	const payload = {
 		requestId: requestId,
-		context: target ? snapshot(target) : null,
+		context: target ? snapshot(target, hostBoxCache) : null,
 		result: result,
 	};
 	outlet(0, "commandSynced", JSON.stringify(payload));
 }
 
+let hostBoxCache = null;
+
 function executeCommand(cmd) {
-	const target = topLevel(this.patcher);
+	const target = targetFor(this);
+	hostBoxCache = hostBox(this);
 	if (cmd.type === "create_object") {
 		handleCreateObject(target, cmd);
 	} else if (cmd.type === "connect_objects") {
@@ -177,17 +317,18 @@ function rectEquals(a, b) {
 }
 
 function resolveById(target, id) {
+	const obj = resolveRaw(target, id);
+	return obj && sameObj(obj, hostBoxCache) ? null : obj; // never touch the assistant
+}
+
+function resolveRaw(target, id) {
 	if (!id) return null;
 	const own = mcpObjects[id];
 	if (own?.maxclass) return own;
 	const byName = target.getnamed(id);
 	if (byName?.maxclass) return byName;
-	const m = /^obj-(\d+)$/.exec(id);
-	if (m) {
-		const obj = lastSnapshot[Number(m[1]) - 1];
-		if (obj?.maxclass) return obj;
-	}
-	return null;
+	const obj = lookupId(id);
+	return obj?.maxclass ? obj : null;
 }
 
 function nameInUse(target, name) {
@@ -350,3 +491,4 @@ function handleDeleteObject(target, cmd) {
 // the Max dispatch table in v8, so attach explicitly too.
 globalThis.getcontext = getcontext;
 globalThis.config = config;
+globalThis.reset = reset;

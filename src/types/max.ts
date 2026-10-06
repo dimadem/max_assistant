@@ -30,6 +30,8 @@ interface Connection {
 
 /** Patch context written to disk and read by MCP tools */
 export interface PatchContext {
+	/** Window title of the patch the assistant is editing (live snapshots only) */
+	patch?: string;
 	boxes: Box[];
 	lines: Connection[];
 }

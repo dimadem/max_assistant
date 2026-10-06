@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { parseContext, writeContext } from "./patch-context.ts";
 
 const ctx = {
+	patch: "Untitled1",
 	boxes: [
 		{ id: "obj-1", maxclass: "newobj", text: "cycle~ 440", rect: [0, 0, 60, 22], numinlets: 2, numoutlets: 1 },
 		{ id: "out", maxclass: "ezdac~", text: "", rect: [0, 60, 45, 45], numinlets: 2, numoutlets: 0 },

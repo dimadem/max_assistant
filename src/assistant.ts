@@ -35,6 +35,8 @@ const SYSTEM_PROMPT = [
 	"  • create_object           — create a new Max object at (x,y) with full Box.text",
 	"  • connect_objects         — connect srcId.outlet → dstId.inlet (ids from get_patch_context)",
 	"  • delete_object           — delete an existing object by id (also removes its patchcords)",
+	"You edit the user's WORK patch (its window title is in get_patch_context → patch), never the assistant's own patch.",
+	"Never guess object modes, attribute names or argument meanings — confirm them with get_object_docs before using them.",
 	"Max/MSP conventions to keep in mind:",
 	"  • Signal objects end with ~ (cycle~, dac~, selector~, etc.)",
 	"  • Data flows left-to-right through inlets/outlets",
@@ -229,6 +231,7 @@ Max.addHandlers({
 	clear: () => {
 		currentSessionId = null;
 		pendingPrompts.length = 0;
+		Max.outlet("bridge", "reset"); // next prompt re-picks the target patch
 		Max.outlet(UI_IN.clearChat);
 		setStatus("ready");
 		setBusy(false);
@@ -241,7 +244,7 @@ Max.addHandlers({
 		try {
 			const ctx = writeContext(joinArgs(data), contextFile);
 			setStatus(
-				`running claude · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`,
+				`running claude · ${ctx.patch ?? "patch"} · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`,
 			);
 			spawnClaude(prompt);
 		} catch (e) {

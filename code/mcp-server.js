@@ -28414,7 +28414,7 @@ class StdioServerTransport {
 import { randomUUID } from "crypto";
 import { appendFileSync, existsSync, readFileSync } from "fs";
 var POLL_INTERVAL_MS = 50;
-var DEFAULT_TIMEOUT_MS = 2000;
+var DEFAULT_TIMEOUT_MS = 5000;
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function sendCommand(commandsPath, resultsPath, type, params, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const requestId = randomUUID();
