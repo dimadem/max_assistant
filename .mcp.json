@@ -2,7 +2,7 @@
 	"mcpServers": {
 		"max-msp": {
 			"command": "bun",
-			"args": ["run", "src/mcp-server.ts"]
+			"args": ["code/mcp-server.js"]
 		}
 	}
 }

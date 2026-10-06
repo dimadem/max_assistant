@@ -5,8 +5,9 @@
 	"scripts": {
 		"dev": "bun run src/assistant.ts",
 		"dev:ui": "bun run scripts/ui-server.ts",
-		"build": "bun run build:agent && bun run build:ui",
+		"build": "bun run build:agent && bun run build:mcp && bun run build:ui",
 		"build:agent": "bun build src/assistant.ts --outfile code/assistant.js --target node --external max-api",
+		"build:mcp": "bun build src/mcp-server.ts --outfile code/mcp-server.js --target bun",
 		"build:ui": "bun build src/ui/app.ts --outfile ui/app.js --target browser --format iife",
 		"mcp": "bun run src/mcp-server.ts",
 		"format": "bunx biome format --write",

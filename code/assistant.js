@@ -6,56 +6,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Max from "max-api";
 
-// src/hfs-path.ts
-import { existsSync } from "node:fs";
-function hfsToPosix(path, exists = existsSync) {
-  const m = path.match(/^([^/:]+):(\/.*)$/);
-  if (!m)
-    return path;
-  const [, volume, rest] = m;
-  if (exists(rest))
-    return rest;
-  const onVolume = `/Volumes/${volume}${rest}`;
-  return exists(onVolume) ? onVolume : rest;
-}
-
-// src/patch-sync.ts
-import { readFileSync, writeFileSync } from "node:fs";
-
-// src/types/max.ts
-function convertMaxpat(raw) {
-  const idToIndex = new Map;
-  const boxes = raw.patcher.boxes.map((entry, i) => {
-    const b = entry.box;
-    idToIndex.set(b.id, i);
-    return {
-      id: b.varname ?? b.id,
-      maxclass: b.maxclass,
-      text: b.text ?? "",
-      rect: b.patching_rect,
-      numinlets: b.numinlets,
-      numoutlets: b.numoutlets
-    };
-  });
-  const lines = [];
-  for (const entry of raw.patcher.lines) {
-    const pl = entry.patchline;
-    const srcIdx = idToIndex.get(pl.source[0]);
-    const dstIdx = idToIndex.get(pl.destination[0]);
-    if (srcIdx !== undefined && dstIdx !== undefined) {
-      lines.push({
-        src: [srcIdx, pl.source[1]],
-        dst: [dstIdx, pl.destination[1]]
-      });
-    }
+// src/patch-context.ts
+import { writeFileSync } from "node:fs";
+function parseContext(json) {
+  const ctx = JSON.parse(json);
+  if (!Array.isArray(ctx.boxes) || !Array.isArray(ctx.lines)) {
+    throw new Error("bridge sent malformed context (missing boxes/lines)");
   }
-  return { boxes, lines };
+  return { boxes: ctx.boxes, lines: ctx.lines };
 }
-
-// src/patch-sync.ts
-function syncContext(maxpatPath, contextPath) {
-  const raw = JSON.parse(readFileSync(maxpatPath, "utf-8"));
-  const ctx = convertMaxpat(raw);
+function writeContext(json, contextPath) {
+  const ctx = parseContext(json);
   writeFileSync(contextPath, JSON.stringify(ctx, null, 2));
   return ctx;
 }
@@ -247,22 +208,21 @@ Max.addHandlers({
     Max.post("Session cleared");
   },
   bridgeResponse: (type, ...data) => {
-    if (type === "context" && data[0]) {
-      const prompt = pendingPrompts.shift();
-      if (!prompt)
-        return;
-      try {
-        const patchPath = hfsToPosix(data[0]);
-        const ctx = syncContext(patchPath, contextFile);
-        setStatus(`running claude · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`);
-        spawnClaude(prompt);
-      } catch (e) {
-        const msg = `Error: ${e}`;
-        Max.post(msg);
-        sendText(UI_IN.appendError, msg);
-        setBusy(false);
-        setStatus("ready");
-      }
+    if (type !== "context")
+      return;
+    const prompt = pendingPrompts.shift();
+    if (!prompt)
+      return;
+    try {
+      const ctx = writeContext(joinArgs(data), contextFile);
+      setStatus(`running claude · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`);
+      spawnClaude(prompt);
+    } catch (e) {
+      const msg = `Error: ${e}`;
+      Max.post(msg);
+      sendText(UI_IN.appendError, msg);
+      setBusy(false);
+      setStatus("ready");
     }
   },
   commandSynced: (...args) => {
@@ -274,11 +234,13 @@ Max.addHandlers({
       Max.post(`commandSynced parse error: ${e}; raw=${json}`);
       return;
     }
-    const { requestId, path, result } = payload;
-    try {
-      syncContext(hfsToPosix(path), contextFile);
-    } catch (e) {
-      Max.post(`syncContext failed after command ${requestId}: ${e}`);
+    const { requestId, context, result } = payload;
+    if (context) {
+      try {
+        writeContext(JSON.stringify(context), contextFile);
+      } catch (e) {
+        Max.post(`context write failed after command ${requestId}: ${e}`);
+      }
     }
     try {
       appendFileSync(RESULTS_FILE, `${JSON.stringify({ requestId, ...result })}

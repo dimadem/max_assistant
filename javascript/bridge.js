@@ -2,8 +2,8 @@
  * bridge.js — runs in [v8].
  *
  * Two responsibilities:
- *   1. `getcontext` — save the live patcher and return its filepath so
- *      assistant.ts can read the .maxpat from disk.
+ *   1. `getcontext` — walk the LIVE patcher (no save to disk) and return a
+ *      PatchContext JSON { boxes, lines } to assistant.ts.
  *   2. Command channel — poll `<root>/commands.ndjson` (~150 ms),
  *      execute each new line via the Patcher API, write a result back
  *      via outlet `commandSynced`. assistant.ts then re-syncs
@@ -14,7 +14,7 @@ autowatch = 1;
 inlets = 1;
 outlets = 1;
 
-post("bridge.js v5 loaded\n");
+post("bridge.js v6 loaded\n");
 
 // ---------- shared helpers ----------------------------------------------
 
@@ -24,18 +24,68 @@ function topLevel(p) {
 	return cur;
 }
 
-// ---------- getcontext (existing handler) -------------------------------
+// ---------- live patch snapshot ------------------------------------------
+
+// Objects from the most recent snapshot, index-aligned with ctx.boxes, so
+// ids like "obj-3" (for objects without a varname) resolve without disk I/O.
+let lastSnapshot = [];
+
+function sameObj(a, b) {
+	if (!a || !b) return false;
+	if (a === b) return true;
+	if (a.varname && a.varname === b.varname) return true;
+	return a.maxclass === b.maxclass && rectEquals(a.rect, b.rect);
+}
+
+function boxText(obj) {
+	try {
+		return obj.boxtext || "";
+	} catch (_) {
+		return "";
+	}
+}
+
+function snapshot(target) {
+	const objs = [];
+	target.apply((obj) => {
+		objs.push(obj);
+		return true;
+	});
+	lastSnapshot = objs;
+
+	const indexOf = (o) => {
+		for (let i = 0; i < objs.length; i++) if (sameObj(objs[i], o)) return i;
+		return -1;
+	};
+
+	const boxes = objs.map((obj, i) => ({
+		id: obj.varname || `obj-${i + 1}`,
+		maxclass: obj.maxclass,
+		text: boxText(obj),
+		rect: obj.rect,
+		numinlets: obj.numinlets,
+		numoutlets: obj.numoutlets,
+	}));
+
+	const lines = [];
+	objs.forEach((obj, i) => {
+		const outs = obj.patchcords?.outputs || [];
+		for (const c of outs) {
+			const j = indexOf(c.dstobject);
+			if (j >= 0) lines.push({ src: [i, c.srcoutlet], dst: [j, c.dstinlet] });
+		}
+	});
+	return { boxes, lines };
+}
 
 function getcontext() {
 	const target = topLevel(this.patcher);
-	target.message("write"); // auto-save before reading from disk
-	outlet(0, "bridgeResponse", "context", target.filepath);
+	outlet(0, "bridgeResponse", "context", JSON.stringify(snapshot(target)));
 }
 
 // ---------- command channel ---------------------------------------------
 
 let COMMANDS_PATH = null;
-let CONTEXT_PATH = null;
 let commandsOffset = 0;
 const seenIds = {};
 let poller = null;
@@ -52,7 +102,6 @@ function config(root) {
 		return;
 	}
 	COMMANDS_PATH = `${root}/commands.ndjson`;
-	CONTEXT_PATH = `${root}/patch-context.json`;
 	commandsOffset = 0;
 	if (!poller) {
 		poller = new Task(pollCommands, this);
@@ -97,7 +146,7 @@ function pollCommands() {
 function sendResult(requestId, target, result) {
 	const payload = {
 		requestId: requestId,
-		path: target ? target.filepath : "",
+		context: target ? snapshot(target) : null,
 		result: result,
 	};
 	outlet(0, "commandSynced", JSON.stringify(payload));
@@ -121,41 +170,10 @@ function executeCommand(cmd) {
 
 // ---------- object resolver ---------------------------------------------
 
-function readContextSnapshot() {
-	if (!CONTEXT_PATH) return null;
-	const f = new File(CONTEXT_PATH, "read");
-	if (!f.isopen) return null;
-	let buf = "";
-	while (f.position < f.eof) {
-		const line = f.readline(8192);
-		if (!line) break;
-		buf += line;
-	}
-	f.close();
-	if (!buf) return null;
-	try {
-		return JSON.parse(buf);
-	} catch (e) {
-		post(`bridge: failed to parse context snapshot: ${e}\n`);
-		return null;
-	}
-}
-
 function rectEquals(a, b) {
 	return (
 		a && b && a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3]
 	);
-}
-
-function findByRect(target, rect) {
-	let found = null;
-	target.applyif(
-		(obj) => {
-			if (!found) found = obj;
-		},
-		(obj) => !found && rectEquals(obj.rect, rect),
-	);
-	return found;
 }
 
 function resolveById(target, id) {
@@ -164,13 +182,10 @@ function resolveById(target, id) {
 	if (own?.maxclass) return own;
 	const byName = target.getnamed(id);
 	if (byName?.maxclass) return byName;
-	if (/^obj-\d+$/.test(id)) {
-		const ctx = readContextSnapshot();
-		if (ctx?.boxes) {
-			for (const box of ctx.boxes) {
-				if (box.id === id) return findByRect(target, box.rect);
-			}
-		}
+	const m = /^obj-(\d+)$/.exec(id);
+	if (m) {
+		const obj = lastSnapshot[Number(m[1]) - 1];
+		if (obj?.maxclass) return obj;
 	}
 	return null;
 }
@@ -242,7 +257,6 @@ function handleCreateObject(target, cmd) {
 		return;
 	}
 	mcpObjects[name] = obj;
-	target.message("write"); // persist .maxpat so assistant.ts reads fresh state
 
 	sendResult(cmd.requestId, target, {
 		ok: true,
@@ -305,7 +319,6 @@ function handleConnectObjects(target, cmd) {
 		});
 		return;
 	}
-	target.message("write");
 	sendResult(cmd.requestId, target, { ok: true });
 }
 
@@ -330,7 +343,6 @@ function handleDeleteObject(target, cmd) {
 	// Drop our own bookkeeping entry if present (so a future create_object
 	// can reuse the freed mcp_<n> name without colliding via getnamed).
 	if (mcpObjects[cmd.id]) delete mcpObjects[cmd.id];
-	target.message("write");
 	sendResult(cmd.requestId, target, { ok: true });
 }
 

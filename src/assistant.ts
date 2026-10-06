@@ -4,8 +4,7 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Max from "max-api";
-import { hfsToPosix } from "./hfs-path.ts";
-import { syncContext } from "./patch-sync.ts";
+import { writeContext } from "./patch-context.ts";
 import { encodeText, UI_IN, type UIInSelector } from "./types/protocol.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -214,7 +213,7 @@ function joinArgs(args: unknown[]): string {
 
 interface CommandSyncedPayload {
 	requestId: string;
-	path: string;
+	context: unknown;
 	result: Record<string, unknown>;
 }
 
@@ -236,23 +235,21 @@ Max.addHandlers({
 		Max.post("Session cleared");
 	},
 	bridgeResponse: (type: string, ...data: unknown[]) => {
-		if (type === "context" && data[0]) {
-			const prompt = pendingPrompts.shift();
-			if (!prompt) return;
-			try {
-				const patchPath = hfsToPosix(data[0] as string);
-				const ctx = syncContext(patchPath, contextFile);
-				setStatus(
-					`running claude · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`,
-				);
-				spawnClaude(prompt);
-			} catch (e) {
-				const msg = `Error: ${e}`;
-				Max.post(msg);
-				sendText(UI_IN.appendError, msg);
-				setBusy(false);
-				setStatus("ready");
-			}
+		if (type !== "context") return;
+		const prompt = pendingPrompts.shift();
+		if (!prompt) return;
+		try {
+			const ctx = writeContext(joinArgs(data), contextFile);
+			setStatus(
+				`running claude · ${ctx.boxes.length} obj · ${ctx.lines.length} conn`,
+			);
+			spawnClaude(prompt);
+		} catch (e) {
+			const msg = `Error: ${e}`;
+			Max.post(msg);
+			sendText(UI_IN.appendError, msg);
+			setBusy(false);
+			setStatus("ready");
 		}
 	},
 	commandSynced: (...args: unknown[]) => {
@@ -264,11 +261,13 @@ Max.addHandlers({
 			Max.post(`commandSynced parse error: ${e}; raw=${json}`);
 			return;
 		}
-		const { requestId, path, result } = payload;
-		try {
-			syncContext(hfsToPosix(path), contextFile);
-		} catch (e) {
-			Max.post(`syncContext failed after command ${requestId}: ${e}`);
+		const { requestId, context, result } = payload;
+		if (context) {
+			try {
+				writeContext(JSON.stringify(context), contextFile);
+			} catch (e) {
+				Max.post(`context write failed after command ${requestId}: ${e}`);
+			}
 		}
 		try {
 			appendFileSync(
