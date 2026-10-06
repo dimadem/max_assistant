@@ -6,6 +6,19 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Max from "max-api";
 
+// src/hfs-path.ts
+import { existsSync } from "node:fs";
+function hfsToPosix(path, exists = existsSync) {
+  const m = path.match(/^([^/:]+):(\/.*)$/);
+  if (!m)
+    return path;
+  const [, volume, rest] = m;
+  if (exists(rest))
+    return rest;
+  const onVolume = `/Volumes/${volume}${rest}`;
+  return exists(onVolume) ? onVolume : rest;
+}
+
 // src/patch-sync.ts
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -74,6 +87,7 @@ var SYSTEM_PROMPT = [
   "Use the provided MCP tools to inspect and modify the current patch:",
   "  • get_patch_context       — full list of objects and connections",
   "  • get_object_connections  — inputs/outputs for a specific object by id",
+  "  • search_objects          — find objects by what they do when you don't know the name (search first, then read docs)",
   "  • get_object_docs         — Max reference docs (inlets, outlets, messages, attributes) for any object type",
   "  • get_object_help         — working example patch (.maxhelp) for an object type",
   "  • create_object           — create a new Max object at (x,y) with full Box.text",
@@ -109,9 +123,6 @@ function setBusy(on) {
 function setStatus(text) {
   sendText(UI_IN.status, text);
 }
-function hfsToPosix(path) {
-  return path.replace(/^[^/]*:/, "");
-}
 function spawnClaude(prompt) {
   const args = [
     "--print",
@@ -120,6 +131,7 @@ function spawnClaude(prompt) {
     "bypassPermissions",
     "--mcp-config",
     MCP_CONFIG,
+    "--strict-mcp-config",
     "--output-format",
     "stream-json",
     "--verbose",

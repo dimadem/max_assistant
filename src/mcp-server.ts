@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { sendCommand } from "./command-channel.ts";
+import { buildIndex, type ObjectEntry, searchIndex } from "./object-index.ts";
 import { parseObjectText } from "./parse-object-text.ts";
 import {
 	convertMaxpat,
@@ -128,6 +129,39 @@ server.tool(
 						null,
 						2,
 					),
+				},
+			],
+		};
+	},
+);
+
+let objectIndex: ObjectEntry[] | null = null;
+
+server.tool(
+	"search_objects",
+	"Search ALL Max/MSP/Jitter objects by what they do. Use this when you don't know the exact object name (e.g. 'delay line', 'random number', 'midi note in', 'lowpass filter'). Returns name, category, short description and related objects. Then use get_object_docs / get_object_help on the best candidates.",
+	{
+		query: z.string().describe("English keywords describing the needed functionality"),
+		limit: z.number().optional().describe("Max results, default 15"),
+	},
+	async ({ query, limit }) => {
+		objectIndex ??= buildIndex(MAX_REFPAGES);
+		if (objectIndex.length === 0) {
+			return {
+				content: [{ type: "text", text: `Reference pages not found at ${MAX_REFPAGES}` }],
+			};
+		}
+		const hits = searchIndex(objectIndex, query, limit ?? 15).map((e) => ({
+			name: e.name,
+			category: e.category,
+			digest: e.digest,
+			seealso: e.seealso.slice(0, 5),
+		}));
+		return {
+			content: [
+				{
+					type: "text",
+					text: hits.length ? JSON.stringify(hits, null, 2) : `No objects matched "${query}"`,
 				},
 			],
 		};

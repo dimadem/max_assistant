@@ -4,6 +4,7 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Max from "max-api";
+import { hfsToPosix } from "./hfs-path.ts";
 import { syncContext } from "./patch-sync.ts";
 import { encodeText, UI_IN, type UIInSelector } from "./types/protocol.ts";
 
@@ -29,6 +30,7 @@ const SYSTEM_PROMPT = [
 	"Use the provided MCP tools to inspect and modify the current patch:",
 	"  • get_patch_context       — full list of objects and connections",
 	"  • get_object_connections  — inputs/outputs for a specific object by id",
+	"  • search_objects          — find objects by what they do when you don't know the name (search first, then read docs)",
 	"  • get_object_docs         — Max reference docs (inlets, outlets, messages, attributes) for any object type",
 	"  • get_object_help         — working example patch (.maxhelp) for an object type",
 	"  • create_object           — create a new Max object at (x,y) with full Box.text",
@@ -92,10 +94,6 @@ function setStatus(text: string): void {
 	sendText(UI_IN.status, text);
 }
 
-// HFS path "Macintosh HD:/Users/..." → POSIX path. No-op for already-POSIX paths.
-function hfsToPosix(path: string): string {
-	return path.replace(/^[^/]*:/, "");
-}
 
 function spawnClaude(prompt: string): void {
 	const args = [
@@ -105,6 +103,7 @@ function spawnClaude(prompt: string): void {
 		"bypassPermissions",
 		"--mcp-config",
 		MCP_CONFIG,
+		"--strict-mcp-config", // ignore the user's global MCP servers
 		"--output-format",
 		"stream-json",
 		"--verbose",
