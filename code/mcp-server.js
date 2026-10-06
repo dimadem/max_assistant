@@ -29495,6 +29495,7 @@ Workflow
 4. Build with create_patch_fragment (many boxes + cords in one call; omit x/y for auto-layout below existing objects). Fix with connect/disconnect/delete.
 5. Read \`warnings\` in every result (signal feedback loops, invalid objects) and fix them. You can't hear audio: tell the user how to test (e.g. turn on ezdac~).
 
+Known Max 9.2 scripting quirk: 'flonum' is created as an INTEGER number box (can't output 0.5). For float control use message boxes ('0.5'), live.dial, or slider \u2192 scale.
 Boxes: object text like 'cycle~ 440'; message boxes use box:'message' with the literal content ('1 10, 0 500'); comments box:'comment'. Hand-typed message boxes read back with empty text.
 Ids: varnames or stable obj-<n>. Ports are 0-indexed from the left; the live patch doesn't expose port counts, so take them from get_object_docs (connect_objects verifies the cord and reports if Max refused it). Signal objects end with ~; ezdac~/dac~ inlets are left/right.`;
 function createServer() {
